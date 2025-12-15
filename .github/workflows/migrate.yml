@@ -65,7 +65,6 @@ jobs:
             echo "Failed to create GitHub repo (HTTP ${CREATE_STATUS})."; exit 1
           fi
           echo "GitHub repo created: https://github.com/${OWNER}/${REPO}"
-
       # Push the mirror to GitHub
       - name: Push mirror to GitHub
         env:
