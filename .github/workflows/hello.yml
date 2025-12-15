@@ -1,14 +1,10 @@
 
-mkdir -p .github/workflows
-
-cat > .github/workflows/hello.yml << 'EOF'
 name: Hello Workflow
 on:
   workflow_dispatch:  # Manual trigger from Actions tab
 
 jobs:
-  hello  hello:
+  hello:
     runs-on: ubuntu-latest
     steps:
       - name: Say Hello
-        run: echo "Hello from GitHub Actions!"
