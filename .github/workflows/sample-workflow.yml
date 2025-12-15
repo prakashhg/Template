@@ -1,0 +1,77 @@
+
+name: Sample Workflow (Preview)
+
+# Manual trigger—so you can run from Actions UI
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+        default: dev
+      notes:
+        description: "Optional notes for this run"
+        required: false
+
+# Optional: add concurrency so concurrent clicks don’t pile up
+concurrency:
+  group: sample-workflow-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (no code needed really)
+        uses: actions/checkout@v4
+
+      - name: Show context
+        run: |
+          echo "Repository: ${{ github.repository }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Branch/Ref: ${{ github.ref }}"
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Notes: ${{ inputs.notes }}"
+
+  validate:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    needs: prepare
+    steps:
+      - name: Validate environment choice
+        run: |
+          case "${{ inputs.environment }}" in
+            dev|qa|prod) echo "Environment OK" ;;
+            *) echo "Invalid environment"; exit 1 ;;
+          esac
+
+      - name: Placeholder checks
+        run: |
+          echo "Running placeholder validation..."
+          echo "Everything looks good ✅"
+
+  simulate:
+    name: Simulate Migration (Dry Run)
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Display plan
+        run: |
+          echo "This is a dry-run (no changes)."
+          echo "Would perform: clone from GitLab, create GitHub repo, push mirror."
+          echo "Tokens/secrets would be read from GitHub Secrets"
+          echo "End of simulation."
+
+  wrapup:
+    name: Wrap Up
+    runs-on: ubuntu-latest
+    needs: simulate
+    steps:
+           - name: Summary
+        run: |
+          echo "Workflow completed successfully."
