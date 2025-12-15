@@ -1,20 +1,12 @@
 
-name: GitLab → GitHub Migration (env: dev)
+name: GitLab → GitHub Migration (Sample Tokens)
 
 on:
-  workflow_dispatch:  # run manually from Actions
-
-permissions:
-  contents: read  # we push using a PAT via HTTPS, not the built-in GITHUB_TOKEN
+  workflow_dispatch:  # Manual trigger from Actions tab
 
 jobs:
   migrate:
     runs-on: ubuntu-latest
-    environment: dev   # <-- makes environment secrets available to this job
-    timeout-minutes: 30
-
-    # Optional: if your environment requires approval, you'll see a "Review deployments" gate in the UI.
-
     steps:
       - name: Install tools
         run: |
@@ -22,28 +14,26 @@ jobs:
           sudo apt-get install -y jq curl
           git --version
 
-      - name: Debug secrets presence (safe)
-        # This does NOT print secret values; it only proves they are non-empty
-        run: |
-          if [ -z "${{ secrets.GITLAB_TOKEN }}" ]; then
-            echo "❌ GITLAB_TOKEN (env: dev) is empty or not defined"; exit 1; fi
-          if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then
-            echo "❌ GITHUB_TOKEN (env: dev) is empty or not defined"; exit 1; fi
-          echo "✅ Environment secrets detected: GITLAB_TOKEN & GITHUB_TOKEN (values hidden)."
-
-      - name: Clone from GitLab (mirror) via HTTPS
+      - name: Clone from GitLab (mirror)
         run: |
           set -euo pipefail
           WORKDIR=/tmp/repo-migration
           mkdir -p "${WORKDIR}"
           cd "${WORKDIR}"
 
-          GITLAB_PROJECT="prakashguruswamy24-group/my_project"   # change if needed
-          # No trailing slash after .git
-          SRC_URL="https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${GITLAB_PROJECT}.git"
+          # ✅ Replace these sample tokens with your real ones
+          GITLAB_TOKEN="glpat_SAMPLE_TOKEN"
+          GITHUB_TOKEN="ghp_SAMPLE_TOKEN"
 
-          echo "Cloning --mirror from GitLab (token hidden in logs)..."
-          GIT_CURL_VERBOSE=1 git clone --mirror "${SRC_URL}" src.git
+          # ✅ Replace these with your actual repo paths
+          GITLAB_PROJECT="prakashguruswamy24-group/my_project"
+          GITHUB_OWNER="prakashhg"
+          GITHUB_REPO="my_project"
+
+          # Build GitLab HTTPS URL with PAT
+          SRC_URL="https://oauth2:${GITLAB_TOKEN}@gitlab.com/${GITLAB_PROJECT}.git"
+          echo "Cloning --mirror from GitLab..."
+          git clone --mirror "${SRC_URL}" src.git
 
           echo "Preview refs:"
           git -C src.git show-ref | head -n 10 || true
@@ -52,12 +42,14 @@ jobs:
         run: |
           set -euo pipefail
           cd /tmp/repo-migration/src.git
-          OWNER="prakashhg"      # change if needed
-          REPO="my_project"      # change if needed
 
-          PUSH_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${OWNER}/${REPO}.git"
-          git remote remove github           git remote remove github 2>/dev/null || true
+          # ✅ Replace with your GitHub PAT
+          GITHUB_TOKEN="ghp_SAMPLE_TOKEN"
+          GITHUB_OWNER="prakashhg"
+          GITHUB_REPO="my_project"
+
+          PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git"
+          git remote remove github 2>/dev/null || true
           git remote add github "${PUSH_URL}"
-
-          echo "Pushing --mirror to https://github.com/${OWNER}/${REPO}..."
+          echo "Pushing --          echo "Pushing --mirror to GitHub..."
           git push --mirror github
