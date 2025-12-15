@@ -1,0 +1,178 @@
+
+name: GitLab → GitHub Repo Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      gitlab_project:
+        description: "GitLab project path (e.g., group/subgroup/repo)"
+        required: true
+        default: "prakashguruswamy24-group/my_project"
+      gitlab_url:
+        description: "GitLab base URL"
+        required: true
+        default: "https://gitlab.com"
+      github_owner:
+        description: "GitHub user/org that will own the repo"
+        required: true
+        default: "prakashhg"
+      github_repo:
+        description: "Destination GitHub repo name"
+        required: true
+        default: "my_project"
+      create_github_repo:
+        description: "Create destination repo if it doesn't exist (true/false)"
+        required: true
+        default: "true"
+      visibility:
+        description: "Destination visibility (private/public)"
+        required: true
+        default: "private"
+
+permissions:
+  contents: read   # workflow itself doesn't use GITHUB_TOKEN to push; we push via PAT
+  packages: read
+
+concurrency:
+  group: migrate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Mirror Git history (branches & tags)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Prepare runner
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+          git --version
+          jq --version || true
+
+      - name: Show plan
+        run: |
+          echo "Source:   ${{ inputs.gitlab_url }}/${{ inputs.gitlab_project }}"
+          echo "Dest:     https://github.com/${{ inputs.github_owner }}/${{ inputs.github_repo }}"
+          echo "Create?:  ${{ inputs.create_github_repo }}"
+          echo "Visib.:   ${{ inputs.visibility }}"
+
+      - name: Determine GitLab default branch
+        id: default_branch
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ENCODED_PROJECT=$(python3 - <<'PY'
+import urllib.parse, os
+print(urllib.parse.quote(os.environ["PROJECT"], safe=""))
+PY
+          )
+          DEFAULT=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            "${{ inputs.gitlab_url }}/api/v4/projects/${ENCODED_PROJECT}" \
+            | jq -r '.default_branch // "main"')
+          echo "Default branch on GitLab: ${DEFAULT}"
+          echo "default=${DEFAULT}" >> "$GITHUB_OUTPUT"
+        env:
+          PROJECT: ${{ inputs.gitlab_project }}
+
+      - name: Clone from GitLab (mirror)
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          set -euo pipefail
+          WORKDIR=/tmp/repo-migration-workdir
+          SRC="${WORKDIR}/src.git"
+          mkdir -p "${WORKDIR}"
+          echo "Cloning mirror from GitLab…"
+          GITLAB_CLONE_URL="https://oauth2:${GITLAB_TOKEN}@${{ inputs.gitlab_url }}/${
+            { inputs.gitlab_project }}"
+          # normalize: remove protocol duplication in URL
+          GITLAB_CLONE_URL="${GITLAB_CLONE_URL/https:\/\/https:\/\//https://}"
+          git clone --mirror "${GITLAB_CLONE_URL}" "${SRC}"
+          echo "Mirror cloned to ${SRC}"
+          ls -la "${SRC}"
+
+      - name: Create GitHub repo if requested
+        if: ${{ inputs.create_github_repo == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="${{ inputs.github_owner }}"
+          REPO="${{ inputs.github_repo }}"
+          VIS="${{ inputs.visibility }}"
+          REPO_API="https://api.github.com/repos/${OWNER}/${REPO}"
+          echo "Checking if https://github.com/${OWNER}/${REPO} exists…"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "${REPO_API}")
+          if [ "${STATUS}" = "200" ]; then
+            echo "Repo already exists."
+            exit 0
+          fi
+          # Decide endpoint: user vs org
+          MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GITHUB_TOKEN}" https://api.github.com/user | jq -r '.login')
+          if [ "${OWNER}" = "${MY_LOGIN}" ]; then
+            CREATE_URL="https://api.github.com/user/repos"
+          else
+            CREATE_URL="https://api.github.com/orgs/${OWNER}/repos"
+          fi
+          PRIVATE=true
+          if [ "${VIS}" = "public" ]; then PRIVATE=false; fi
+          PAYLOAD=$(jq -n --arg name "${REPO}" --argjson private ${PRIVATE} \
+            '{name: $name, private: $private, has_issues: true, has_projects: true, has_wiki: true}')
+          CREATE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}" \
+            "${CREATE_URL}")
+          if [ "${CREATE_STATUS}" != "201" ]; then
+            echo "Failed to create GitHub repo (HTTP ${CREATE_STATUS})."
+            exit 1
+          fi
+          echo "GitHub repo created."
+
+      - name: Push mirror to GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          WORKDIR=/tmp/repo-migration-workdir
+          SRC="${WORKDIR}/src.git"
+          OWNER="${{ inputs.github_owner }}"
+          REPO="${{ inputs.github_repo }}"
+          PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${OWNER}/${REPO}.git"
+          cd "${SRC}"
+          git remote remove github 2>/dev/null || true
+          git remote add github "${PUSH_URL}"
+          echo "Pushing --mirror to GitHub…"
+          git push --mirror github
+          echo "Mirror push complete."
+
+      - name: Set GitHub default branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="${{ inputs.github_owner }}"
+          REPO="${{ inputs.github_repo }}"
+          DEFAULT="${{ steps.default_branch.outputs.default }}"
+          REPO_API="https://api.github.com/repos/${OWNER}/${REPO}"
+          echo "Setting default branch on GitHub to '${DEFAULT}'…"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X PATCH \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg db "${DEFAULT}" '{default_branch: $db}')" \
+            "${REPO_API}")
+          if [ "${STATUS}" != "200" ]; then
+            echo "Could not set default branch (HTTP ${STATUS})."
+          else
+            echo "Default branch set."
+          fi
+
+      - name: Wrap up
+        run: echo "Migration completed ✅"
+``
