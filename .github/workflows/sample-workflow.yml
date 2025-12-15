@@ -1,22 +1,6 @@
 
 name: Sample Workflow (Preview)
 
-# Manual trigger—so you can run from Actions UI
-on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: "Target environment"
-        type: choice
-        options:
-          - dev
-          - qa
-          - prod
-        default: dev
-      notes:
-        description: "Optional notes for this run"
-        required: false
-
 # Optional: add concurrency so concurrent clicks don’t pile up
 concurrency:
   group: sample-workflow-${{ github.ref }}
