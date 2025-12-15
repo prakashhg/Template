@@ -70,7 +70,7 @@ jobs:
       # Push the mirror to GitHub
       - name: Push mirror to GitHub
         env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PAT: ${{ secrets.GIT_TOKEN }}
         run: |
           set -euo pipefail
           OWNER="prakashhg"      # <--- change if needed
