@@ -1,18 +1,13 @@
 
-name: GitLab → GitHub Migration (env: dev)
+name: Mirroring (GitLab → GitHub)
 
 on:
-  workflow_dispatch:   # run manually from the Actions tab
-
-permissions:
-  contents: read       # we push using PAT over HTTPS, not the built-in GITHUB_TOKEN
+  # same triggers you used; you can remove push/delete if you want manual only
+  [push, delete, workflow_dispatch]
 
 jobs:
-  migrate:
+  to_github:
     runs-on: ubuntu-latest
-    environment: dev   # <-- required to load environment secrets from 'dev'
-    timeout-minutes: 30
-
     steps:
       - name: Install tools
         run: |
@@ -20,44 +15,70 @@ jobs:
           sudo apt-get install -y jq curl
           git --version
 
-      - name: Verify environment secrets (safe)
-        run: |
-          if [ -z "${{ secrets.GITLAB_TOKEN }}" ]; then
-            echo "❌ Missing env secret: GITLAB_TOKEN (environment: dev)"; exit 1; fi
-          if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then
-            echo "❌ Missing env secret: GITHUB_TOKEN (environment: dev)"; exit 1; fi
-          echo "✅ Found environment secrets (values hidden)."
-
-      - name: Clone from GitLab (mirror) via HTTPS
+      # Clone the source repo from GitLab in mirror mode
+      - name: Clone GitLab mirror
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
           set -euo pipefail
-          WORKDIR=/tmp/repo-migration
+          # ---- configure your source here ----
+          GITLAB_URL="https://gitlab.com"
+          GITLAB_PROJECT="prakashguruswamy24-group/my_project"   # <--- change if needed
+          WORKDIR="/tmp/mirror-work"
           mkdir -p "${WORKDIR}"
           cd "${WORKDIR}"
-
-          # ---- CHANGE THESE for your source project ----
-          GITLAB_PROJECT="prakashguruswamy24-group/my_project"
-
-          # No trailing          # No trailing '/' after .git
-          SRC_URL="https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/${GITLAB_PROJECT}.git"
-          echo "Cloning --mirror from GitLab… (token hidden)"
-          GIT_TRACE=1 GIT_CURL_VERBOSE=1 git clone --mirror "${SRC_URL}" src.git
-
-          echo "Preview refs:"
+          HOST="${GITLAB_URL#https://}"
+          SRC_URL="https://oauth2:${GITLAB_TOKEN}@${HOST}/${GITLAB_PROJECT}.git"
+          echo "Cloning --mirror from ${SRC_URL}"
+          git clone --mirror "${SRC_URL}" src.git
+          echo "Refs (preview):"
           git -C src.git show-ref | head -n 10 || true
 
-      - name: Push mirror to GitHub (HTTPS PAT)
+      # Optionally create destination repo on GitHub if it doesn't exist
+      - name: Create GitHub repo if missing
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          cd /tmp/repo-migration/src.git
+          OWNER="prakashhg"            # <--- change if needed
+          REPO="my_project"            # <--- change if needed
+          REPO_API="https://api.github.com/repos/${OWNER}/${REPO}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_PAT}" "${REPO_API}")
+          if [ "${STATUS}" = "200" ]; then
+            echo "Repo already exists on GitHub."
+            exit 0
+          fi
+          # Decide endpoint: user vs org
+          MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GITHUB_PAT}" https://api.github.com/user | jq -r '.login')
+          if [ "${OWNER}" = "${MY_LOGIN}" ]; then
+            CREATE_URL="https://api.github.com/user/repos"
+          else
+            CREATE_URL="https://api.github.com/orgs/${OWNER}/repos"
+          fi
+          PAYLOAD='{"name":"'"${REPO}"'","private":true,"has_issues":true,"has_projects":true,"has_wiki":true}'
+          CREATE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_PAT}" \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}" \
+            "${CREATE_URL}")
+          if [ "${CREATE_STATUS}" != "201" ]; then
+            echo "Failed to create GitHub repo (HTTP ${CREATE_STATUS})."; exit 1
+          fi
+          echo "GitHub repo created: https://github.com/${OWNER}/${REPO}"
 
-          # ---- CHANGE THESE for your destination ----
-          OWNER="prakashhg"
-          REPO="my_project"
-
-          PUSH_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${OWNER}/${REPO}.git"
+      # Push the mirror to GitHub
+      - name: Push mirror to GitHub
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="prakashhg"      # <--- change if needed
+          REPO="my_project"      # <--- change if needed
+          cd /tmp/mirror-work/src.git
+          PUSH_URL="https://x-access-token:${GITHUB_PAT}@github.com/${OWNER}/${REPO}.git"
           git remote remove github 2>/dev/null || true
           git remote add github "${PUSH_URL}"
-
-          echo "Pushing --mirror to https://github.com/${OWNER}/${REPO}…"
+          echo "Pushing --mirror to ${OWNER}/${REPO}…"
           git push --mirror github
+         
