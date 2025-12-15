@@ -1,3 +1,4 @@
+
 name: Mirroring (GitLab → GitHub)
 
 on:
@@ -21,8 +22,8 @@ jobs:
         run: |
           set -euo pipefail
           # ---- configure your source here ----
-          GITLAB_URL= ${{ vars.GITLAB_URL }}
-          GITLAB_PROJECT=  ${{ vars.GITLAB_PROJECT }}  # <--- change if needed
+          GITLAB_URL="https://gitlab.com"
+          GITLAB_PROJECT="prakashguruswamy24-group/my_project"   # <--- change if needed
           WORKDIR="/tmp/mirror-work"
           mkdir -p "${WORKDIR}"
           cd "${WORKDIR}"
@@ -39,8 +40,8 @@ jobs:
           GITHUB_PAT: ${{ secrets.GIT_TOKEN }}
         run: |
           set -euo pipefail
-          OWNER= ${{ vars.OWNER }}     # <--- change if needed
-          REPO= ${{ vars.REPO }}     # <--- change if needed
+          OWNER="prakashhg"            # <--- change if needed
+          REPO="my_project"            # <--- change if needed
           REPO_API="https://api.github.com/repos/${OWNER}/${REPO}"
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "Authorization: Bearer ${GITHUB_PAT}" "${REPO_API}")
@@ -65,16 +66,17 @@ jobs:
             echo "Failed to create GitHub repo (HTTP ${CREATE_STATUS})."; exit 1
           fi
           echo "GitHub repo created: https://github.com/${OWNER}/${REPO}"
+
       # Push the mirror to GitHub
       - name: Push mirror to GitHub
         env:
           GITHUB_PAT: ${{ secrets.GIT_TOKEN }}
         run: |
           set -euo pipefail
-          OWNER= ${{ vars.OWNER }}     # <--- change if needed
-          REPO= ${{ vars.REPO }}     # <--- change if needed
+          OWNER="prakashhg"      # <--- change if needed
+          REPO="my_project"      # <--- change if needed
           cd /tmp/mirror-work/src.git
-          PUSH_URL="https://x-access-token:${GITHUB_PAT}@github.com/${OWNER}/${REPO}.git"
+          PUSH_URL="https://x-access-token:${GIT_PAT}@github.com/${OWNER}/${REPO}.git"
           git remote remove github 2>/dev/null || true
           git remote add github "${PUSH_URL}"
           echo "Pushing --mirror to ${OWNER}/${REPO}…"
