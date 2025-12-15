@@ -37,7 +37,7 @@ jobs:
       # Optionally create destination repo on GitHub if it doesn't exist
       - name: Create GitHub repo if missing
         env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PAT: ${{ secrets.GIT_TOKEN }}
         run: |
           set -euo pipefail
           OWNER="prakashhg"            # <--- change if needed
