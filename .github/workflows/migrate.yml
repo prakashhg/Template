@@ -7,11 +7,6 @@ env:
   # Working dir
   WORKDIR: /tmp/mirror-work
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-
 jobs:
   # 1) Repo Migration · 1.1 Commit Sync
   repo_migration_commit_sync:
