@@ -97,4 +97,3 @@ jobs:
       gl_project: ${{ needs.commit_sync.outputs.gl_project }}
       gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
       gh_repo: ${{ needs.commit_sync.outputs.gh_repo }}
-``
