@@ -1,5 +1,4 @@
 name: Mirroring (GitLab → GitHub) + Trackers migration
-
 on:
   push:
   delete:
