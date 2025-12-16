@@ -20,47 +20,6 @@ jobs:
       gl_project: ${{ inputs.gl_project }}
       gh_owner:   ${{ inputs.gh_owner }}
       gh_repo:    ${{ inputs.gh_repo }}
-      auto_create:${{ inputs.auto_create }}
-      delete_first:${{ inputs.delete_first }}
-    secrets: inherit
-
-  tag-sync:
-    needs: commit-sync
-    uses: ./.github/workflows/tag_sync.yml
-    with:
-      gl_url:     ${{ inputs.gl_url }}
-      gl_project: ${{ inputs.gl_project }}
-      gh_owner:   ${{ inputs.gh_owner }}
-      gh_repo:    ${{ inputs.gh_repo }}
-    secrets: inherit
-
-  label-sync:
-    needs: commit-sync
-    uses: ./.github/workflows/label_sync.yml
-    with:
-      gl_url:     ${{ inputs.gl_url }}
-      gl_project: ${{ inputs.gl_project }}
-      gh_owner:   ${{ inputs.gh_owner }}
-      gh_repo:    ${{ inputs.gh_repo }}
-    secrets: inherit
-
-  milestone-sync:
-    needs: [commit-sync, label-sync]
-    uses: ./.github/workflows/milestone_sync.yml
-    with:
-      gl_url:     ${{ inputs.gl_url }}
-      gl_project: ${{ inputs.gl_project }}
-      gh_owner:   ${{ inputs.gh_owner }}
-      gh_repo:    ${{ inputs.gh_repo }}
-    secrets: inherit
-
-  pr-sync:
-    if: ${{ inputs.migrate_mrs }}
-    needs: commit-sync
-    uses: ./.github/workflows/pr_sync.yml
-    with:
-      gl_url:     ${{ inputs.gl_url }}
-      gl_project: ${{ inputs.gl_project }}
-      gh_owner:   ${{ inputs.gh_owner }}
-      gh_repo:    ${{ inputs.gh_repo }}
+      auto_create: ${{ inputs.auto_create }}
+      delete_first: ${{ inputs.delete_first }}
     secrets: inherit
