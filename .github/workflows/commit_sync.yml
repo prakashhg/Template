@@ -7,8 +7,8 @@ on:
       gl_project: { required: true, type: string }
       gh_owner:   { required: true, type: string }
       gh_repo:    { required: true, type: string }
-      auto_create:{ required: true, type: boolean }
-      delete_first:{ required: true, type: boolean }
+      auto_create: { required: true, type: boolean }
+      delete_first: { required: true, type: boolean }
     secrets:
       GITLAB_TOKEN: { required: true }
       GH_PAT:       { required: true }
