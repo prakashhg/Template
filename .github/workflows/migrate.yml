@@ -394,7 +394,7 @@ jobs:
             page="$next"
           done
 
-  # 1) Repo Migration · 1.5 Milestone Sync
+  # 1) Repo Migration · 1.5 Milestone Sync (corrected)
   repo_migration_milestone_sync:
     name: "1) Repo Migration · 1.5 Milestone Sync"
     needs: [repo_migration_commit_sync, repo_migration_label_sync]
@@ -431,20 +431,33 @@ jobs:
           : "${GL_ENC:?GL_ENC is empty}"
           : "${GH_OWNER:?GH_OWNER is empty}"
           : "${GH_REPO:?GH_REPO is empty}"
+
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" "$GL_API/projects/$GL_ENC/milestones?per_page=100&page=$page" > "$RESP"
+
+            # RAW '&' in query string; no HTML entities
+            curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
+              "$GL_API/projects/$GL_ENC/milestones?per_page=100&page=$page" > "$RESP"
+
             jq -c '.[]' "$RESP" | while read -r ms; do
               title=$(jq -r '.title' <<< "$ms")
               description=$(jq -r '.description // empty' <<< "$ms")
               due=$(jq -r '.due_date // empty' <<< "$ms")
-              CREATE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                -d "$(jq -n --arg title "$title" --arg desc "$description" --arg due "$due" '{title:$title, description:$desc} + ( ($due|length>0) ? {due_on:$due} : {} )')" \
+
+              # GitHub expects 'due_on' (ISO 8601). Build JSON safely.
+              payload=$(jq -n --arg title "$title" --arg desc "$description" --arg due "$due" \
+                '{title:$title, description:$desc} + ( ($due|length>0) ? {due_on:$due} : {} )')
+
+              status=$(curl -s -o /dev/null -w "%{http_code}" \
+                -H "Authorization: Bearer $GH_PAT" \
+                -H "Accept: application/vnd.github+json" \
+                -d "$payload" \
                 "https://api.github.com/repos/$GH_OWNER/$GH_REPO/milestones")
-              echo "Milestone $title status: $CREATE"
+              echo "Milestone $title status: $status"
               sleep 1
             done
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-            [[ -z "$next" || "$next" == "0            [[ -z "$next" || "$next" == "0" ]] && break
+
+                       next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+            [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
