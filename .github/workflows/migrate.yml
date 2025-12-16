@@ -43,11 +43,11 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Secrets
-      GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:    ${{ secrets.GH_PAT }}
+      # Secrets (set under Settings → Secrets and variables → Actions → Secrets)
+      GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}  # GitLab PAT: read_api + read_repository
+      GH_PAT:    ${{ secrets.GH_PAT }}        # GitHub PAT: repo (and admin:org if creating in orgs)
 
-      # Variables (no GITHUB_* custom names)
+      # Variables (set under Settings → Secrets and variables → Actions → Variables)
       VAR_GL_URL:          ${{ vars.GL_URL }}
       VAR_GL_PROJECT:      ${{ vars.GL_PROJECT }}
       VAR_GH_OWNER:        ${{ vars.GH_OWNER }}
@@ -55,7 +55,7 @@ jobs:
       VAR_AUTO_CREATE:     ${{ vars.AUTO_CREATE_REPO }}
       VAR_DELETE_FIRST:    ${{ vars.DELETE_DEST_REPO_FIRST }}
 
-      # Inputs
+      # workflow_dispatch inputs (override Variables when provided)
       IN_GL_URL:           ${{ inputs.gl_url }}
       IN_GL_PROJECT:       ${{ inputs.gl_project }}
       IN_GH_OWNER:         ${{ inputs.gh_owner }}
@@ -65,12 +65,15 @@ jobs:
 
     steps:
       - name: Print runner & git version
+        shell: bash
         run: |
+          set -euo pipefail
           set -x
           echo "Runner: $(uname -a)"
           git --version
 
       - name: Install tools
+        shell: bash
         run: |
           set -euo pipefail
           set -x
@@ -79,10 +82,12 @@ jobs:
 
       - name: Resolve configuration
         id: cfg
+        shell: bash
         run: |
           set -euo pipefail
           set -x
 
+          # Precedence: Inputs > Variables > Defaults
           GL_URL="${IN_GL_URL:-${VAR_GL_URL:-https://gitlab.com}}"
           GL_PROJECT="${IN_GL_PROJECT:-${VAR_GL_PROJECT:-}}"
           GH_OWNER="${IN_GH_OWNER:-${VAR_GH_OWNER:-}}"
@@ -90,50 +95,38 @@ jobs:
           AUTO_CREATE="${IN_AUTO_CREATE:-${VAR_AUTO_CREATE:-true}}"
           DELETE_FIRST="${IN_DELETE_FIRST:-${VAR_DELETE_FIRST:-false}}"
 
+          # Validation
           ERR=0
-          [[ -z "${GL_PROJECT}" ]] && echo "❌ GL_PROJECT is required (input 'gl_project' or variable 'GL_PROJECT')." && ERR=1
-          [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]] && echo "❌ GH_OWNER and GH_REPO are required (inputs or variables)." && ERR=1
-          [[ -z "${GL_TOKEN:-}" ]] && echo "❌ Missing secret GITLAB_TOKEN." && ERR=1
-          [[ -z "${GH_PAT:-}" ]] && echo "❌ Missing secret GH_PAT." && ERR=1
+          [[ -z "${GL_PROJECT}" ]] && echo "ERROR: GL_PROJECT is required (input 'gl_project' or variable 'GL_PROJECT')." && ERR=1
+          [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]] && echo "ERROR: GH_OWNER and GH_REPO are required (inputs or variables)." && ERR=1
+          [[ -z "${GL_TOKEN:-}" ]] && echo "ERROR: Missing secret GITLAB_TOKEN." && ERR=1
+          [[ -z "${GH_PAT:-}" ]] && echo "ERROR: Missing secret GH_PAT." && ERR=1
           if [[ "${ERR}" -ne 0 ]]; then
-            echo "❌ Configuration invalid. Aborting."
+            echo "ERROR: Configuration invalid. Aborting."
             exit 1
           fi
 
-          {
-            echo 'GL_URL<<__EOF__'
-            echo "${GL_URL}"
-            echo '__EOF__'
-            echo 'GL_PROJECT<<__EOF__'
-            echo "${GL_PROJECT}"
-            echo '__EOF__'
-            echo 'GH_OWNER<<__EOF__'
-            echo "${GH_OWNER}"
-            echo '__EOF__'
-            echo 'GH_REPO<<__EOF__'
-            echo "${GH_REPO}"
-            echo '__EOF__'
-            echo 'AUTO_CREATE<<__EOF__'
-            echo "${AUTO_CREATE}"
-            echo '__EOF__'
-            echo 'DELETE_FIRST<<__EOF__'
-            echo "${DELETE_FIRST}"
-            echo '__EOF__'
-            echo 'WORKDIR<<__EOF__'
-            echo "/tmp/mirror-work"
-            echo '__EOF__'
-          } >> "$GITHUB_ENV"
+          # Export to $GITHUB_ENV using safe multiline syntax
+          echo 'GL_URL<<__EOF__'       >> "$GITHUB_ENV"; echo "${GL_URL}"       >> "$GITHUB_ENV"; echo '__EOF__' >> "$GITHUB_ENV"
+          echo 'GL_PROJECT<<__EOF__'   >> "$GITHUB_ENV"; echo "${GL_PROJECT}"   >> "$GITHUB_ENV"; echo '__EOF__' >> "$GITHUB_ENV"
+          echo 'GH_OWNER<<__EOF__'     >> "$GITHUB_ENV"; echo "${GH_OWNER}"     >> "$GITHUB_ENV"; echo '__EOF__' >> "$GITHUB_ENV"
+          echo 'GH_REPO<<__EOF__'      >> "$GITHUB_ENV"; echo "${GH_REPO}"      >> "$GITHUB_ENV"; echo '__EOF__' >> "$GITHUB_ENV"
+          echo 'AUTO_CREATE<<__EOF__'  >> "$GITHUB_ENV"; echo "${AUTO_CREATE}"  >> "$GITHUB_ENV"; echo '__EOF__' >> "$GITHUB_ENV"
+          echo 'DELETE_FIRST<<__EOF__' >> "$GITHUB_ENV"; echo "${DELETE_FIRST}" >> "$GITHUB_ENV"; echo '__EOF__' >> "$GITHUB_ENV"
+          echo 'WORKDIR<<__EOF__'      >> "$GITHUB_ENV"; echo "/tmp/mirror-work" >> "$GITHUB_ENV"; echo '__EOF__' >> "$GITHUB_ENV"
 
-          echo "Using configuration:"
+          # Human-readable summary (ASCII only)
+          printf 'Using configuration:\n'
           printf ' - GL_URL=%s\n'      "${GL_URL}"
           printf ' - GL_PROJECT=%s\n'  "${GL_PROJECT}"
           printf ' - GH_OWNER=%s\n'    "${GH_OWNER}"
           printf ' - GH_REPO=%s\n'     "${GH_REPO}"
           printf ' - AUTO_CREATE=%s\n' "${AUTO_CREATE}"
-          printf ' - DELETE_FIRST=%s\n'"${DELETE_FIRST}"
+          printf ' - DELETE_FIRST=%s\n' "${DELETE_FIRST}"
 
       - name: Optionally delete destination repository (DANGER)
         if: env.DELETE_FIRST == 'true'
+        shell: bash
         env:
           GH_OWNER: ${{ env.GH_OWNER }}
           GH_REPO:  ${{ env.GH_REPO }}
@@ -148,12 +141,13 @@ jobs:
             "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}")
           echo "Delete HTTP status: ${STATUS}"
           if [[ "${STATUS}" != "204" && "${STATUS}" != "404" ]]; then
-            echo "❌ Delete failed (HTTP ${STATUS})."; exit 1
+            echo "ERROR: Delete failed (HTTP ${STATUS})."; exit 1
           fi
           [[ "${STATUS}" == "404" ]] && echo "Repo did not exist; proceeding."
 
       - name: Create GitHub repo if missing (optional)
         if: env.AUTO_CREATE == 'true'
+        shell: bash
         env:
           GH_OWNER: ${{ env.GH_OWNER }}
           GH_REPO:  ${{ env.GH_REPO }}
@@ -167,13 +161,14 @@ jobs:
             -H "Authorization: Bearer ${GH_PAT}" "${REPO_API}")
           echo "Probe status: ${STATUS}"
 
-          if [ "${STATUS}" = "200" ]; then
+          if [[ "${STATUS}" == "200" ]]; then
             echo "Repo already exists on GitHub."
             exit 0
           fi
 
+          # Determine endpoint: user vs org
           MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
-          if [ "${GH_OWNER}" = "${MY_LOGIN}" ]; then
+          if [[ "${GH_OWNER}" == "${MY_LOGIN}" ]]; then
             CREATE_URL="https://api.github.com/user/repos"
           else
             CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
@@ -194,14 +189,15 @@ jobs:
           echo "Create repo HTTP status: ${HTTP_STATUS}"
           echo "Response body: ${BODY}"
 
-          if [ "${HTTP_STATUS}" != "201" ]; then
-            echo "❌ Failed to create GitHub repo (HTTP ${HTTP_STATUS})."
+          if [[ "${HTTP_STATUS}" != "201" ]]; then
+            echo "ERROR: Failed to create GitHub repo (HTTP ${HTTP_STATUS})."
             exit 1
           fi
 
-          echo "✅ GitHub repo created: https://github.com/${GH_OWNER}/${GH_REPO}"
+          echo "GitHub repo created: https://github.com/${GH_OWNER}/${GH_REPO}"
 
       - name: Clone GitLab mirror
+        shell: bash
         env:
           GL_URL:     ${{ env.GL_URL }}
           GL_PROJECT: ${{ env.GL_PROJECT }}
@@ -213,7 +209,8 @@ jobs:
           mkdir -p "${WORKDIR}"
           cd "${WORKDIR}"
 
-          HOST="${GL_URL#https://}"
+          # Strip scheme from GL_URL safely (handles http/https)
+          HOST="${GL_URL#*://}"
           SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${GL_PROJECT}.git"
 
           echo "Cloning --mirror from ${GL_URL}/${GL_PROJECT}"
@@ -223,6 +220,7 @@ jobs:
           git -C src.git show-ref | head -n 10 || true
 
       - name: Push mirror to GitHub
+        shell: bash
         env:
           GH_OWNER: ${{ env.GH_OWNER }}
           GH_REPO:  ${{ env.GH_REPO }}
@@ -235,8 +233,10 @@ jobs:
 
           PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
 
-          git remote remove github 2>/dev/null || true
+          git          git remote remove github 2>/dev/null || true
           git remote add github "${PUSH_URL}"
 
-          echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}…"
-          git
+          git remote -v
+          git show-ref | head -n 10 || true
+
+          echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
