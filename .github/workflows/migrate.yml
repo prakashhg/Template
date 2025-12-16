@@ -1,3 +1,4 @@
+
 name: Mirroring (GitLab → GitHub) + Trackers migration [Production]
 
 on:
@@ -11,26 +12,26 @@ permissions:
 defaults:
   run:
     shell: bash
-# Single source of truth: repository/environment Variables & Secrets only.
+
+# Single source of truth: Variables & Secrets only (no defaults here).
 env:
-  # Variables (must be set in Repo/Environment Variables)
+  # Variables (must be set in Repo/Environment -> Variables)
   GL_URL: ${{ vars.GL_URL }}
   GL_PROJECT: ${{ vars.GL_PROJECT }}
   GH_OWNER: ${{ vars.GH_OWNER }}
   GH_REPO: ${{ vars.GH_REPO }}
-  AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}           # 'true' or 'false'
-  DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}    # 'true' or 'false'
-  MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}                # 'true' or 'false'
+  AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}         # 'true' or 'false'
+  DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}  # 'true' or 'false'
+  MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}              # 'true' or 'false'
 
-  # Secrets
+  # Secrets (Repo -> Settings -> Secrets)
   GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
   GH_PAT: ${{ secrets.GH_PAT }}
 
-  # Working dir
+  # Working directory used by all jobs
   WORKDIR: /tmp/mirror-work
 
 jobs:
-  # 1) Repo Migration · 1.1 Commit Sync
   repo_migration_commit_sync:
     name: "1) Repo Migration · 1.1 Commit Sync"
     runs-on: ubuntu-latest
@@ -47,7 +48,8 @@ jobs:
           set -euo pipefail
           REPO_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-                   -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                   -H "Authorization: Bearer ${GH_PAT}" \
+                   -H "Accept: application/vnd.github+json" \
                    "${REPO_URL}")
           echo "Delete HTTP status: ${STATUS}"
           if [[ "${STATUS}" != "204" && "${STATUS}" != "404" ]]; then
@@ -101,7 +103,6 @@ jobs:
           echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
           git push --mirror github
 
-  # 1) Repo Migration · 1.2 Tag Sync
   repo_migration_tag_sync:
     name: "1) Repo Migration · 1.2 Tag Sync"
     needs: repo_migration_commit_sync
@@ -130,12 +131,11 @@ jobs:
           echo "Pushing tags..."
           git push --tags github
 
-  # 1) Repo Migration · 1.3 PR Sync (MR → PR)
   repo_migration_pr_sync:
     name: "1) Repo Migration · 1.3 PR Sync (MR → PR)"
     needs: repo_migration_commit_sync
     runs-on: ubuntu-latest
-    if: ${{ vars.MIGRATE_MRS == 'true' }}  # job-level check must use vars
+    if: ${{ vars.MIGRATE_MRS == 'true' }}  # job-level condition must use vars
     steps:
       - name: Install jq & curl
         run: |
@@ -161,6 +161,7 @@ jobs:
             RESP=$(mktemp) ; HDR=$(mktemp)
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/projects/$GL_ENC/merge_requests?scope=all&per_page=100&page=$page" > "$RESP"
+
             while read -r mr; do
               title=$(jq -r '.title' <<< "$mr")
               body=$(jq -r '.description // ""' <<< "$mr")
@@ -229,12 +230,12 @@ jobs:
                 cpage="$nnext"
               done
             done < <(jq -c '.[]' "$RESP")
+
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
           done
 
-  # 1) Repo Migration · 1.4 Label Sync
   repo_migration_label_sync:
     name: "1) Repo Migration · 1.4 Label Sync"
     needs: repo_migration_commit_sync
@@ -286,7 +287,6 @@ jobs:
             page="$next"
           done
 
-  # 1) Repo Migration · 1.5 Milestone Sync
   repo_migration_milestone_sync:
     name: "1) Repo Migration · 1.5 Milestone Sync"
     needs: [repo_migration_commit_sync, repo_migration_label_sync]
@@ -309,7 +309,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Keep logic in a small script to avoid quoting issues
           cat > milestones.sh <<'BASH'
           set -euo pipefail
           page=1
@@ -333,6 +332,8 @@ jobs:
             done < <(jq -c '.[]' "$RESP")
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
-                       page="$next"
+            page="$next"
           done
           BASH
+          bash milestones.sh
+``
