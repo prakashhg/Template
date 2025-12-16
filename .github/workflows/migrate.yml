@@ -46,7 +46,6 @@ permissions:
 
 jobs:
   commit_sync:
-    # Reusable workflow
     uses: ./.github/workflows/commit_sync.yml
     secrets: inherit
     with:
@@ -66,7 +65,7 @@ jobs:
       gl_url: ${{ needs.commit_sync.outputs.gl_url }}
       gl_project: ${{ needs.commit_sync.outputs.gl_project }}
       gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
-      gh_repo:  ${{ needs.commit_sync.outputs.gh_repo }}
+      gh_repo: ${{ needs.commit_sync.outputs.gh_repo }}
 
   label_sync:
     needs: commit_sync
@@ -76,7 +75,7 @@ jobs:
       gl_url: ${{ needs.commit_sync.outputs.gl_url }}
       gl_project: ${{ needs.commit_sync.outputs.gl_project }}
       gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
-      gh_repo:  ${{ needs.commit_sync.outputs.gh_repo }}
+      gh_repo: ${{ needs.commit_sync.outputs.gh_repo }}
 
   milestone_sync:
     needs: [commit_sync, label_sync]
@@ -86,7 +85,7 @@ jobs:
       gl_url: ${{ needs.commit_sync.outputs.gl_url }}
       gl_project: ${{ needs.commit_sync.outputs.gl_project }}
       gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
-      gh_repo:  ${{ needs.commit_sync.outputs.gh_repo }}
+      gh_repo: ${{ needs.commit_sync.outputs.gh_repo }}
 
   pr_sync:
     needs: commit_sync
@@ -97,4 +96,5 @@ jobs:
       gl_url: ${{ needs.commit_sync.outputs.gl_url }}
       gl_project: ${{ needs.commit_sync.outputs.gl_project }}
       gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
-      gh_repo:  ${{ needs.commit_sync.outputs.gh
+      gh_repo: ${{ needs.commit_sync.outputs.gh_repo }}
+``
