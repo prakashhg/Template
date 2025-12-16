@@ -1,179 +1,334 @@
 
-name: Group-wide Migration (GitLab → GitHub) [Production]
+name: Mirroring (GitLab → GitHub) + Trackers migration [Production, Multi]
 
 on:
   workflow_dispatch:
     inputs:
-      gl_url:
-        description: "GitLab base URL"
-        type: string
+      # --- Single-repo mode (same as your current workflow) ---
+      gl_project:
+        description: "GitLab project path (e.g., group/subgroup/repo)"
         required: false
-        default: "https://gitlab.com"
-      gl_group:
-        description: "GitLab group path or ID (e.g., my-group or company/dept/team)"
         type: string
-        required: true
-      include_subgroups:
-        description: "Include subgroup projects?"
-        type: choice
-        required: false
-        default: "true"
-        options:
-          - "true"
-          - "false"
       gh_owner:
-        description: "GitHub owner (org or user) where repos will live"
+        description: "GitHub user/org owner (e.g., my-org)"
+        required: false
         type: string
-        required: true
-      auto_create_repo:
-        description: "Create destination repo if missing?"
-        type: choice
+      gh_repo:
+        description: "GitHub repository name (e.g., my_repo). If empty in group-mode, it's derived."
+        required: false
+        type: string
+
+      # --- Group (multi-repo) mode ---
+      gl_group:
+        description: "GitLab group path for discovery (e.g., group/subgroup)"
+        required: false
+        type: string
+      include_subgroups:
+        description: "Also include subgroups"
         required: false
         default: "true"
-        options:
-          - "true"
-          - "false"
-      delete_dest_repo_first:
-        description: "Delete destination repo before mirroring (DANGER)?"
         type: choice
+        options: ["true", "false"]
+      include_archived:
+        description: "Include archived projects"
         required: false
         default: "false"
-        options:
-          - "true"
-          - "false"
+        type: choice
+        options: ["true", "false"]
+      include_pattern:
+        description: "Regex filter to include (applied to path_with_namespace). Empty = all"
+        required: false
+        default: ""
+        type: string
+      exclude_pattern:
+        description: "Regex filter to exclude (applied to path_with_namespace). Empty = none"
+        required: false
+        default: ""
+        type: string
+      name_template:
+        description: "Template for GH repo names; default replaces '/' with '-'. Use {path_with_namespace}, {path}"
+        required: false
+        default: "{path_with_namespace|slash_to_dash}"
+        type: string
+      max_repos:
+        description: "Max number of repos to migrate from discovery (0 = no limit)"
+        required: false
+        default: "0"
+        type: string
+      dry_run:
+        description: "Only discover and print repo plan (no migration)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      max_parallel:
+        description: "Max concurrent repo migrations (1-20)"
+        required: false
+        default: "4"
+        type: string
+
+      # --- Behavior toggles (kept from your original file) ---
+      auto_create_repo:
+        description: "Create destination repo if missing? (true/false)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      delete_dest_repo_first:
+        description: "Delete destination repo before mirroring? (DANGEROUS)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
       migrate_mrs:
-        description: "Migrate Merge Requests → Pull Requests"
-        type: choice
+        description: "Migrate Merge Requests → Pull Requests (true/false)"
         required: false
         default: "true"
-        options:
-          - "true"
-          - "false"
-      migrate_issues:
-        description: "Migrate Issues + Comments"
         type: choice
+        options: ["true", "false"]
+      gl_url:
+        description: "GitLab base URL (default from vars.GL_URL or https://gitlab.com)"
         required: false
-        default: "true"
-        options:
-          - "true"
-          - "false"
+        type: string
 
 permissions:
   contents: write
   issues: write
   pull-requests: write
 
+env:
+  # Secrets
+  GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+  GH_PAT:   ${{ secrets.GH_PAT }}
+
+  # Variable fallbacks (org/repo Variables)
+  VAR_GL_URL:                  ${{ vars.GL_URL }}
+  VAR_GH_OWNER:                ${{ vars.GH_OWNER }}
+  VAR_AUTO_CREATE:             ${{ vars.AUTO_CREATE_REPO }}
+  VAR_DELETE_FIRST:            ${{ vars.DELETE_DEST_REPO_FIRST }}
+  VAR_MIGRATE_MRS:             ${{ vars.MIGRATE_MRS }}
+
 jobs:
-  list_projects:
-    name: "0) Discover GitLab projects in group"
+  # -----------------------------
+  # 0) Resolve mode & discover repos (group mode) OR build single target
+  # -----------------------------
+  discover:
+    name: "0) Discover repositories / Build plan"
     runs-on: ubuntu-latest
     outputs:
-      matrix_entries: ${{ steps.build.outputs.matrix_entries }}
-      gl_url: ${{ steps.export.outputs.gl_url }}
-      gh_owner: ${{ steps.export.outputs.gh_owner }}
-      auto_create: ${{ steps.export.outputs.auto_create }}
-      delete_first: ${{ steps.export.outputs.delete_first }}
-      migrate_mrs: ${{ steps.export.outputs.migrate_mrs }}
-      migrate_issues: ${{ steps.export.outputs.migrate_issues }}
-    env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      IN_GL_URL: ${{ inputs.gl_url }}
-      IN_GL_GROUP: ${{ inputs.gl_group }}
-      IN_INCLUDE_SUBGROUPS: ${{ inputs.include_subgroups }}
-      IN_GH_OWNER: ${{ inputs.gh_owner }}
-      IN_AUTO_CREATE: ${{ inputs.auto_create_repo }}
-      IN_DELETE_FIRST: ${{ inputs.delete_dest_repo_first }}
-      IN_MIGRATE_MRS: ${{ inputs.migrate_mrs }}
-      IN_MIGRATE_ISSUES: ${{ inputs.migrate_issues }}
+      projects_json: ${{ steps.out.outputs.projects_json }}
+      count: ${{ steps.out.outputs.count }}
+      gl_url: ${{ steps.cfg.outputs.gl_url }}
+      gh_owner: ${{ steps.cfg.outputs.gh_owner }}
+      auto_create: ${{ steps.cfg.outputs.auto_create }}
+      delete_first: ${{ steps.cfg.outputs.delete_first }}
+      migrate_mrs: ${{ steps.cfg.outputs.migrate_mrs }}
     steps:
       - name: Install jq & curl
         run: |
+          set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      - name: Resolve configuration
-        id: export
+      - name: Resolve inputs & defaults
+        id: cfg
         shell: bash
         run: |
           set -euo pipefail
-          GL_URL="${IN_GL_URL:-https://gitlab.com}"
-          GH_OWNER="${IN_GH_OWNER:?GitHub owner is required}"
-          AUTO_CREATE="${IN_AUTO_CREATE:-true}"
-          DELETE_FIRST="${IN_DELETE_FIRST:-false}"
-          MIGRATE_MRS="${IN_MIGRATE_MRS:-true}"
-          MIGRATE_ISSUES="${IN_MIGRATE_ISSUES:-true}"
+          # Inputs
+          IN_GL_URL="${{ inputs.gl_url }}"
+          IN_GL_PROJECT="${{ inputs.gl_project }}"
+          IN_GL_GROUP="${{ inputs.gl_group }}"
+          IN_GH_OWNER="${{ inputs.gh_owner }}"
+          IN_GH_REPO="${{ inputs.gh_repo }}"
+          IN_AUTO_CREATE="${{ inputs.auto_create_repo }}"
+          IN_DELETE_FIRST="${{ inputs.delete_dest_repo_first }}"
+          IN_MIGRATE_MRS="${{ inputs.migrate_mrs }}"
+
+          # Defaults/fallbacks
+          GL_URL="${IN_GL_URL:-${VAR_GL_URL:-https://gitlab.com}}"
+          GH_OWNER="${IN_GH_OWNER:-${VAR_GH_OWNER:-}}"
+          AUTO_CREATE="${IN_AUTO_CREATE:-${VAR_AUTO_CREATE:-true}}"
+          DELETE_FIRST="${IN_DELETE_FIRST:-${VAR_DELETE_FIRST:-false}}"
+          MIGRATE_MRS="${IN_MIGRATE_MRS:-${VAR_MIGRATE_MRS:-true}}"
+
+          if [[ -z "${GL_TOKEN:-}" ]]; then echo "ERROR: Missing secret GITLAB_TOKEN"; exit 1; fi
+          if [[ -z "${GH_PAT:-}" ]]; then echo "ERROR: Missing secret GH_PAT"; exit 1; fi
+          if [[ -z "${GH_OWNER}" ]]; then echo "ERROR: GH_OWNER required (input or vars.GH_OWNER)"; exit 1; fi
+
+          echo "gl_url=${GL_URL}" >>"$GITHUB_OUTPUT"
+          echo "gh_owner=${GH_OWNER}" >>"$GITHUB_OUTPUT"
+          echo "auto_create=${AUTO_CREATE}" >>"$GITHUB_OUTPUT"
+          echo "delete_first=${DELETE_FIRST}" >>"$GITHUB_OUTPUT"
+          echo "migrate_mrs=${MIGRATE_MRS}" >>"$GITHUB_OUTPUT"
+
+          # Export for later steps
           {
-            echo "gl_url=${GL_URL}"
-            echo "gh_owner=${GH_OWNER}"
-            echo "auto_create=${AUTO_CREATE}"
-            echo "delete_first=${DELETE_FIRST}"
-            echo "migrate_mrs=${MIGRATE_MRS}"
-            echo "migrate_issues=${MIGRATE_ISSUES}"
-          } >> "$GITHUB_OUTPUT"
+            echo "GL_URL=${GL_URL}"
+            echo "IN_GL_PROJECT=${IN_GL_PROJECT}"
+            echo "IN_GL_GROUP=${IN_GL_GROUP}"
+            echo "IN_GH_REPO=${IN_GH_REPO}"
+          } >> "$GITHUB_ENV"
 
-      - name: Build matrix from GitLab group (JSON array)
-        id: build
+      - name: Build plan (single or group mode)
+        id: plan
         shell: bash
         run: |
           set -euo pipefail
-          : "${GL_TOKEN:?Missing secret GITLAB_TOKEN}"
-          : "${IN_GL_GROUP:?gl_group input is required}"
+          GL_API="${GL_URL%/}/api/v4"
 
-          GL_API="${IN_GL_URL%/}/api/v4"
-          GL_GROUP_ENC="$(jq -rn --arg x "$IN_GL_GROUP" '$x|@uri')"
-          INC_SUB="${IN_INCLUDE_SUBGROUPS:-true}"
+          inc_sub="${{ inputs.include_subgroups }}"
+          inc_arch="${{ inputs.include_archived }}"
+          inc_pat="${{ inputs.include_pattern }}"
+          exc_pat="${{ inputs.exclude_pattern }}"
+          name_tmpl="${{ inputs.name_template }}"
+          max_repos="${{ inputs.max_repos }}"
+          dry="${{ inputs.dry_run }}"
 
-          TMP_LIST="$(mktemp)"
-          page=1
-          while true; do
-            RESP="$(mktemp)"; HDR="$(mktemp)"
-            curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
-              "$GL_API/groups/$GL_GROUP_ENC/projects?include_subgroups=$INC_SUB&per_page=100&page=$page" > "$RESP"
+          projects="[]"
 
-            jq -c '.[] | {gl_project: .path_with_namespace, gh_repo: .path}' "$RESP" >> "$TMP_LIST"
+          if [[ -n "${IN_GL_PROJECT}" ]]; then
+            # ----- Single repo mode (compatible with your original workflow) -----
+            gh_repo="${IN_GH_REPO}"
+            if [[ -z "$gh_repo" ]]; then
+              # Default: use the last path segment of gl_project
+              gh_repo="${IN_GL_PROJECT##*/}"
+            fi
+            projects="$(jq -n --arg p "$IN_GL_PROJECT" --arg r "$gh_repo" '[{gl_project:$p, gh_repo:$r}]')"
+          else
+            # ----- Group (multi) mode -----
+            if [[ -z "${IN_GL_GROUP}" ]]; then
+              echo "ERROR: Provide either gl_project (single) or gl_group (multi)"; exit 1
+            fi
 
-            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')"
-            [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
-          done
+            enc_group=$(jq -rn --arg x "$IN_GL_GROUP" '$x|@uri')
 
-          MATRIX_ARRAY="$(jq -s '.' "$TMP_LIST")"
-          echo "matrix_entries=${MATRIX_ARRAY}" >> "$GITHUB_OUTPUT"
+            # Resolve group to numeric ID (GitLab accepts path or ID in the same endpoint)
+            grp_json=$(curl -s -H "PRIVATE-TOKEN: $GL_TOKEN" "$GL_API/groups/$enc_group")
+            gid=$(jq -r '.id // empty' <<<"$grp_json")
+            if [[ -z "$gid" || "$gid" == "null" ]]; then
+              echo "ERROR: Could not resolve GitLab group '$IN_GL_GROUP'"; exit 1
+            fi
 
-  migrate_repo:
-    name: "1) Migrate project → ${{ matrix.gh_repo }}"
-    needs: list_projects
+            page=1
+            while true; do
+              url="$GL_API/groups/$gid/projects?per_page=100&page=$page&include_subgroups=$inc_sub&archived=$inc_arch&with_shared=false&order_by=path&sort=asc"
+              resp=$(mktemp) ; hdr=$(mktemp)
+              curl -s -D "$hdr" -H "PRIVATE-TOKEN: $GL_TOKEN" "$url" > "$resp"
+
+              # Iterate and filter
+              while read -r row; do
+                pwn=$(jq -r '.path_with_namespace' <<<"$row")  # e.g., group/sub/repo
+                path=$(jq -r '.path' <<<"$row")                # e.g., repo
+                archived=$(jq -r '.archived' <<<"$row")
+
+                # Include/exclude filters
+                if [[ -n "$inc_pat" ]]; then
+                  if ! [[ "$pwn" =~ $inc_pat ]]; then continue; fi
+                fi
+                if [[ -n "$exc_pat" ]]; then
+                  if [[ "$pwn" =~ $exc_pat ]]; then continue; fi
+                fi
+                if [[ "${{ inputs.include_archived }}" != "true" && "$archived" == "true" ]]; then
+                  continue
+                fi
+
+                # Name templating
+                gh_name="$path"
+                case "$name_tmpl" in
+                  "{path_with_namespace|slash_to_dash}")
+                    gh_name="${pwn//\//-}"
+                    ;;
+                  "{path_with_namespace}")
+                    # Not valid on GitHub if contains '/', so force dash replacement
+                    gh_name="${pwn//\//-}"
+                    ;;
+                  "{path}")
+                    gh_name="$path"
+                    ;;
+                  *)
+                    # Simple macro replacement: supports {path_with_namespace} and {path}
+                    gh_name="${name_tmpl//\{path_with_namespace\}/$pwn}"
+                    gh_name="${gh_name//\{path\}/$path}"
+                    gh_name="${gh_name//\|slash_to_dash/}"
+                    gh_name="${gh_name//\//-}"
+                    ;;
+                esac
+
+                projects=$(jq --arg p "$pwn" --arg r "$gh_name" '. + [{gl_project:$p, gh_repo:$r}]' <<<"$projects")
+              done < <(jq -c '.[]' "$resp")
+
+              next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$hdr" | tr -d '\r')
+              if [[ -z "$next" || "$next" == "0" ]]; then break; fi
+              page="$next"
+            done
+
+            # Limit count if requested
+            if [[ "$max_repos" != "0" ]]; then
+              projects=$(jq --argjson n "$max_repos" '.[0:$n]' <<<"$projects")
+            fi
+          fi
+
+          count=$(jq 'length' <<<"$projects")
+          echo "Discovered $count repo(s)."
+          echo "PROJECTS_JSON<<EOF" >> "$GITHUB_ENV"
+          echo "$projects" >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+
+          # Pretty print plan
+          echo "---- Migration Plan ----"
+          jq -r '.[] | "- " + .gl_project + "  →  " + .gh_repo' <<<"$projects"
+
+          # If dry run, mark so downstream can skip
+          echo "DRY=${dry}" >> "$GITHUB_ENV"
+          echo "COUNT=${count}" >> "$GITHUB_ENV"
+
+      - name: Output plan
+        id: out
+        run: |
+          echo "projects_json=${PROJECTS_JSON}" >> "$GITHUB_OUTPUT"
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+  # -----------------------------
+  # 1) Migrate many (matrix) or one
+  # -----------------------------
+  migrate:
+    name: "1) Migrate repositories"
+    needs: discover
+    if: ${{ needs.discover.outputs.count != '0' && inputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
       matrix:
-        include: ${{ fromJson(needs.list_projects.outputs.matrix_entries) }}
+        repo: ${{ fromJSON(needs.discover.outputs.projects_json) }}
     env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT: ${{ secrets.GH_PAT }}
-      GL_URL: ${{ needs.list_projects.outputs.gl_url }}
-      GH_OWNER: ${{ needs.list_projects.outputs.gh_owner }}
-      AUTO_CREATE: ${{ needs.list_projects.outputs.auto_create }}
-      DELETE_FIRST: ${{ needs.list_projects.outputs.delete_first }}
-      MIGRATE_MRS: ${{ needs.list_projects.outputs.migrate_mrs }}
-      MIGRATE_ISSUES: ${{ needs.list_projects.outputs.migrate_issues }}
-      GL_PROJECT: ${{ matrix.gl_project }}
-      GH_REPO: ${{ matrix.gh_repo }}
-      WORKDIR: /tmp/mirror-work
+      # Inherit resolved config
+      GL_URL:      ${{ needs.discover.outputs.gl_url }}
+      GH_OWNER:    ${{ needs.discover.outputs.gh_owner }}
+      AUTO_CREATE: ${{ needs.discover.outputs.auto_create }}
+      DELETE_FIRST:${{ needs.discover.outputs.delete_first }}
+      MIGRATE_MRS: ${{ needs.discover.outputs.migrate_mrs }}
+
+      # Per-repo
+      GL_PROJECT:  ${{ matrix.repo.gl_project }}
+      GH_REPO:     ${{ matrix.repo.gh_repo }}
+      WORKDIR:     /tmp/mirror-work/${{ matrix.repo.gh_repo }}
     steps:
-      - name: Install tools
+      - name: Install git/jq/curl
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq curl git
+          sudo apt-get install -y git jq curl
 
       - name: Validate env
-        shell: bash
         run: |
           set -euo pipefail
-          [[ -z "${GL_PROJECT:-}" ]] && { echo "GL_PROJECT missing"; exit 1; }
-          [[ -z "${GH_OWNER:-}" || -z "${GH_REPO:-}" ]] && { echo "GH_OWNER/GH_REPO missing"; exit 1; }
-          [[ -z "${GL_TOKEN:-}" ]] && { echo "Missing secret GITLAB_TOKEN"; exit 1; }
-          [[ -z "${GH_PAT:-}" ]] && { echo "Missing secret GH_PAT"; exit 1; }
+          [[ -z "${GL_PROJECT}" ]] && { echo "GL_PROJECT empty"; exit 1; }
+          [[ -z "${GH_OWNER}"   ]] && { echo "GH_OWNER empty"; exit 1; }
+          [[ -z "${GH_REPO}"    ]] && { echo "GH_REPO empty"; exit 1; }
+          [[ -z "${GL_TOKEN}"   ]] && { echo "Missing GITLAB_TOKEN"; exit 1; }
+          [[ -z "${GH_PAT}"     ]] && { echo "Missing GH_PAT"; exit 1; }
+          echo "Migrating: ${GL_PROJECT}  →  ${GH_OWNER}/${GH_REPO}"
 
       - name: Optionally delete destination repository (DANGER)
         if: env.DELETE_FIRST == 'true'
@@ -208,7 +363,7 @@ jobs:
             PAYLOAD=$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
             RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Content-Type: application/json" -d "${PAYLOAD}" "${CREATE_URL}")
             HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
-            [[ "${HTTP}" == "201" ]] || { echo "Failed to create repo (HTTP ${HTTP})."; exit 1; }
+            if [[ "${HTTP}" != "201" ]]; then echo "Failed to create repo (HTTP ${HTTP})."; exit 1; fi
           fi
           echo "GH repo ready: https://github.com/${GH_OWNER}/${GH_REPO}"
           sleep 1
@@ -236,7 +391,7 @@ jobs:
           echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
           git push --mirror github
 
-      - name: Fetch tags from GitLab and push to GitHub
+      - name: Push tags
         shell: bash
         run: |
           set -euo pipefail
@@ -249,109 +404,33 @@ jobs:
           git push --tags github
 
       - name: Prepare GitLab API (safe encoding)
+        id: api
         shell: bash
         run: |
           set -euo pipefail
+          [[ -z "${GL_URL:-}" ]] && { echo "GL_URL missing"; exit 1; }
+          [[ -z "${GL_PROJECT:-}" ]] && { echo "GL_PROJECT missing"; exit 1; }
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC="$(jq -rn --arg x "$GL_PROJECT" '$x|@uri')"
+          GL_ENC=$(jq -rn --arg x "$GL_PROJECT" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-
-      - name: Migrate merge requests → pull requests
-        if: env.MIGRATE_MRS == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${GH_OWNER:?GH_OWNER empty}"
-          : "${GH_REPO:?GH_REPO empty}"
-          : "${GL_API:?GL_API empty}"
-          : "${GL_ENC:?GL_ENC empty}"
-          page=1
-          while true; do
-            RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
-              "$GL_API/projects/$GL_ENC/merge_requests?scope=all&per_page=100&page=$page" > "$RESP"
-            jq -c '.[]' "$RESP" | while read -r mr; do
-              title=$(jq -r '.title' <<< "$mr")
-              body=$(jq -r '.description // ""' <<< "$mr")
-              state=$(jq -r '.state' <<< "$mr")
-              labels=$(jq -c '.labels' <<< "$mr")
-              source_branch=$(jq -r '.source_branch' <<< "$mr")
-              target_branch=$(jq -r '.target_branch' <<< "$mr")
-              author=$(jq -r '.author.username' <<< "$mr")
-              gl_iid=$(jq -r '.iid' <<< "$mr")
-
-              HEAD_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" "https://api.github.com/repos/$GH_OWNER/$GH_REPO/git/refs/heads/$source_branch")
-              BASE_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" "https://api.github.com/repos/$GH_OWNER/$GH_REPO/git/refs/heads/$target_branch")
-              if [[ "$HEAD_OK" != "200" || "$BASE_OK" != "200" ]]; then
-                echo "Skip MR#$gl_iid: missing head/base ($source_branch→$target_branch)"; continue
-              fi
-
-              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                -d "$(jq -n --arg title "$title" --arg body "**Imported from GitLab by @$author**\n\n$body" --arg head "$source_branch" --arg base "$target_branch" '{title:$title, body:$body, head:$head, base:$base}')" \
-                "https://api.github.com/repos/$GH_OWNER/$GH_REPO/pulls")
-              http=$(echo "$CREATE" | sed -n 's/^HTTP_STATUS://p')
-              pr_num=$(echo "$CREATE" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
-              echo "PR create status=$http number=$pr_num"
-
-              if [[ -n "$pr_num" && "$labels" != "null" ]]; then
-                curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" -d "$labels" \
-                  "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$pr_num/labels"
-                sleep 1
-              fi
-
-              if [[ -n "$pr_num" ]]; then
-                if [[ "$state" == "closed" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" -d '{"state":"closed"}' \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$pr_num"
-                elif [[ "$state" == "merged" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" -d '{"merge_method":"merge"}' \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/pulls/$pr_num/merge"
-                fi
-                sleep 1
-              fi
-
-              # MR comments
-              cpage=1
-              while true; do
-                CRESP=$(mktemp) ; CHDR=$(mktemp)
-                curl -s -D "$CHDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
-                  "$GL_API/projects/$GL_ENC/merge_requests/$gl_iid/notes?activity_filter=only_comments&per_page=100&page=$cpage" > "$CRESP"
-                jq -c '.[]' "$CRESP" | while read -r note; do
-                  nbody=$(jq -r '.body' <<< "$note")
-                  nauth=$(jq -r '.author.username' <<< "$note")
-                  curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                    -d "$(jq -n --arg b "**@$nauth (from GitLab)**\n\n$nbody" '{body:$b}')" \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$pr_num/comments"
-                  sleep 1
-                done
-                nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$CHDR" | tr -d '\r')
-                [[ -z "$nnext" || "$nnext" == "0" ]] && break
-                cpage="$nnext"
-              done
-            done
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-            [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
-          done
 
       - name: Migrate labels (GitLab → GitHub)
         shell: bash
         run: |
           set -euo pipefail
-          : "${GL_API:?GL_API is empty}"
-          : "${GL_ENC:?GL_ENC is empty}"
-          : "${GH_OWNER:?GH_OWNER is empty}"
-          : "${GH_REPO:?GH_REPO is empty}"
+          : "${GL_API:?GL_API empty}"
+          : "${GL_ENC:?GL_ENC empty}"
+          : "${GH_OWNER:?GH_OWNER empty}"
+          : "${GH_REPO:?GH_REPO empty}"
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
-              "$GL_API/projects/$GL_ENC/labels?per_page=100&page=$page" > "$RESP"
+            curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" "$GL_API/projects/$GL_ENC/labels?per_page=100&page=$page" > "$RESP"
             jq -c '.[]' "$RESP" | while read -r lbl; do
-              name=$(jq -r '.name' <<< "$lbl")
-              color=$(jq -r '.color' <<< "$lbl" | sed 's/^#//')
-              description=$(jq -r '.description // empty' <<< "$lbl")
+              name=$(jq -r '.name' <<<"$lbl")
+              color=$(jq -r '.color' <<<"$lbl" | sed 's/^#//')
+              description=$(jq -r '.description // empty' <<<"$lbl")
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
                 -d "$(jq -n --arg name "$name" --arg color "$color" --arg desc "$description" '{name:$name, color:$color, description:$desc}')" \
                 "https://api.github.com/repos/$GH_OWNER/$GH_REPO/labels")
@@ -359,7 +438,7 @@ jobs:
               if [[ "$ST" != "201" ]]; then
                 curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
                   -d "$(jq -n --arg new "$name" --arg color "$color" --arg desc "$description" '{new_name:$new, color:$color, description:$desc}')" \
-                  "https://api.github.com/repos/$GH_OWNER/$GH_REPO/labels/$name"
+                  "https://api.github.com/repos/$GH_OWNER/$GH_REPO/labels/$name" > /dev/null
               fi
               sleep 1
             done
@@ -372,11 +451,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          : "${GL_API:?GL_API is empty}"
-          : "${GL_ENC:?GL_ENC is empty}"
-          : "${GH_OWNER:?GH_OWNER is empty}"
-          : "${GH_REPO:?GH_REPO is empty}"
-
+          : "${GL_API:?GL_API empty}"
+          : "${GL_ENC:?GL_ENC empty}"
+          : "${GH_OWNER:?GH_OWNER empty}"
+          : "${GH_REPO:?GH_REPO empty}"
           cat > milestones.sh <<'BASH'
           set -euo pipefail
           page=1
@@ -385,13 +463,14 @@ jobs:
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/projects/$GL_ENC/milestones?per_page=100&page=$page" > "$RESP"
             jq -c '.[]' "$RESP" | while read -r ms; do
-              title=$(jq -r '.title' <<< "$ms")
-              description=$(jq -r '.description // empty' <<< "$ms")
-              due=$(jq -r '.due_date // empty' <<< "$ms")
+              title=$(jq -r '.title' <<<"$ms")
+              description=$(jq -r '.description // empty' <<<"$ms")
+              due=$(jq -r '.due_date // empty' <<<"$ms")
               payload=$(jq -n --arg title "$title" --arg desc "$description" --arg due "$due" \
                 '{title:$title, description:$desc} + ( ($due|length>0) ? {due_on:$due} : {} )')
               status=$(curl -s -o /dev/null -w "%{http_code}" \
-                -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $GH_PAT" \
+                -H "Accept: application/vnd.github+json" \
                 -d "$payload" \
                 "https://api.github.com/repos/$GH_OWNER/$GH_REPO/milestones")
               echo "Milestone $title status: $status"
@@ -402,83 +481,79 @@ jobs:
             page="$next"
           done
           BASH
-
           bash milestones.sh
 
-      - name: Migrate issues + comments (GitLab → GitHub)
-        if: env.MIGRATE_ISSUES == 'true'
+      - name: Migrate merge requests → pull requests
+        if: env.MIGRATE_MRS == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          : "${GL_API:?GL_API is empty}"
-          : "${GL_ENC:?GL_ENC is empty}"
-          : "${GH_OWNER:?GH_OWNER is empty}"
-          : "${GH_REPO:?GH_REPO is empty}"
-
-          cat > issues.sh <<'BASH'
-          set -euo pipefail
+          : "${GL_API:?GL_API empty}"
+          : "${GL_ENC:?GL_ENC empty}"
+          : "${GH_OWNER:?GH_OWNER empty}"
+          : "${GH_REPO:?GH_REPO empty}"
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
-              "$GL_API/projects/$GL_ENC/issues?scope=all&per_page=100&page=$page" > "$RESP"
-            jq -c '.[]' "$RESP" | while read -r is; do
-              title=$(jq -r '.title' <<< "$is")
-              body=$(jq -r '.description // ""' <<< "$is")
-              state=$(jq -r '.state' <<< "$is")
-              labels=$(jq -c '.labels' <<< "$is")
-              ml_title=$(jq -r '.milestone.title // empty' <<< "$is")
-              author=$(jq -r '.author.username' <<< "$is")
+            curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" "$GL_API/projects/$GL_ENC/merge_requests?scope=all&per_page=100&page=$page" > "$RESP"
+            jq -c '.[]' "$RESP" | while read -r mr; do
+              title=$(jq -r '.title' <<<"$mr")
+              body=$(jq -r '.description // ""' <<<"$mr")
+              state=$(jq -r '.state' <<<"$mr")
+              labels=$(jq -c '.labels' <<<"$mr")
+              source_branch=$(jq -r '.source_branch' <<<"$mr")
+              target_branch=$(jq -r '.target_branch' <<<"$mr")
+              author=$(jq -r '.author.username' <<<"$mr")
+              gl_iid=$(jq -r '.iid' <<<"$mr")
 
-              payload=$(jq -n --arg title "$title" \
-                              --arg body "**Imported from GitLab by @$author**\n\n$body" \
-                              --argjson labels "$labels" \
-                              '{title:$title, body:$body, labels:$labels}')
-
-              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                -d "$payload" \
-                "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues")
-              http=$(echo "$CREATE" | sed -n 's/^HTTP_STATUS://p')
-              gh_issue_number=$(echo "$CREATE" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
-              echo "Issue create status=$http number=$gh_issue_number"
-
-              if [[ -n "$ml_title" && -n "$gh_issue_number" ]]; then
-                mid=$(
-                  curl -s -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/milestones" \
-                  | jq -r --arg t "$ml_title" '.[] | select(.title==$t) | .number' | head -n1
-                )
-                if [[ -n "$mid" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PATCH \
-                    -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                    -d "$(jq -n --argjson m "$mid" '{milestone:$m}')" \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$gh_issue_number"
-                  sleep 1
-                fi
+              HEAD_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" \
+                "https://api.github.com/repos/$GH_OWNER/$GH_REPO/git/refs/heads/$source_branch")
+              BASE_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" \
+                "https://api.github.com/repos/$GH_OWNER/$GH_REPO/git/refs/heads/$target_branch")
+              if [[ "$HEAD_OK" != "200" || "$BASE_OK" != "200" ]]; then
+                echo "Skip MR#$gl_iid: missing head/base ($source_branch→$target_branch)"; continue
               fi
 
-              if [[ "$state" == "closed" && -n "$gh_issue_number" ]]; then
-                curl -s -o /dev/null -w "%{http_code}" -X PATCH \
-                  -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                  -d '{"state":"closed"}' \
-                  "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$gh_issue_number"
+              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
+                -d "$(jq -n --arg title "$title" --arg body "**Imported from GitLab by @$author**\n\n$body" --arg head "$source_branch" --arg base "$target_branch" \
+                      '{title:$title, body:$body, head:$head, base:$base}')" \
+                "https://api.github.com/repos/$GH_OWNER/$GH_REPO/pulls")
+              http=$(echo "$CREATE" | sed -n 's/^HTTP_STATUS://p')
+              pr_num=$(echo "$CREATE" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
+              echo "PR create status=$http number=$pr_num"
+
+              if [[ -n "$pr_num" && "$labels" != "null" ]]; then
+                curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
+                  -d "$labels" \
+                  "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$pr_num/labels" > /dev/null
                 sleep 1
               fi
 
-              gl_iid=$(jq -r '.iid' <<< "$is")
+              if [[ -n "$pr_num" ]]; then
+                if [[ "$state" == "closed" ]]; then
+                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
+                    -d '{"state":"closed"}' \
+                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$pr_num" > /dev/null
+                elif [[ "$state" == "merged" ]]; then
+                  curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
+                    -d '{"merge_method":"merge"}' \
+                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/pulls/$pr_num/merge" > /dev/null
+                fi
+                sleep 1
+              fi
+
+              # MR comments → PR comments
               cpage=1
               while true; do
                 CRESP=$(mktemp) ; CHDR=$(mktemp)
                 curl -s -D "$CHDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
-                  "$GL_API/projects/$GL_ENC/issues/$gl_iid/notes?activity_filter=only_comments&per_page=100&page=$cpage" > "$CRESP"
+                  "$GL_API/projects/$GL_ENC/merge_requests/$gl_iid/notes?activity_filter=only_comments&per_page=100&page=$cpage" > "$CRESP"
                 jq -c '.[]' "$CRESP" | while read -r note; do
-                  nbody=$(jq -r '.body' <<< "$note")
-                  nauth=$(jq -r '.author.username' <<< "$note")
-                  curl -s -o /dev/null -w "%{http_code}" \
-                    -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
+                  nbody=$(jq -r '.body' <<<"$note")
+                  nauth=$(jq -r '.author.username' <<<"$note")
+                  curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
                     -d "$(jq -n --arg b "**@$nauth (from GitLab)**\n\n$nbody" '{body:$b}')" \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$gh_issue_number/comments"
+                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$pr_num/comments" > /dev/null
                   sleep 1
                 done
                 nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$CHDR" | tr -d '\r')
@@ -489,6 +564,5 @@ jobs:
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
-                   done
-          BASH
-
+          done
+``
