@@ -1,3 +1,4 @@
+
 name: Group-wide Migration (GitLab → GitHub) [Production]
 
 on:
@@ -19,7 +20,7 @@ on:
         type: choice
         options: ["true", "false"]
       gh_owner:
-        description: "GitHub owner (org or user) under which repos will be created/pushed"
+        description: "GitHub owner (org or user)"
         required: true
         type: string
       auto_create_repo:
@@ -53,28 +54,28 @@ permissions:
   pull-requests: write
 
 jobs:
-  # 0) Discover all projects in the group and build a dynamic matrix
+  # 0) Discover all projects in the group and build a simple JSON array for matrix.include
   list_projects:
     name: "0) Discover GitLab projects in group"
     runs-on: ubuntu-latest
     outputs:
-      project_matrix: ${{ steps.build.outputs.project_matrix }}
-      gl_url: ${{ steps.export.outputs.gl_url }}
-      gh_owner: ${{ steps.export.outputs.gh_owner }}
-      auto_create: ${{ steps.export.outputs.auto_create }}
-      delete_first: ${{ steps.export.outputs.delete_first }}
-      migrate_mrs: ${{ steps.export.outputs.migrate_mrs }}
-      migrate_issues: ${{ steps.export.outputs.migrate_issues }}
+      matrix_entries: ${{ steps.build.outputs.matrix_entries }}
+      gl_url:        ${{ steps.export.outputs.gl_url }}
+      gh_owner:      ${{ steps.export.outputs.gh_owner }}
+      auto_create:   ${{ steps.export.outputs.auto_create }}
+      delete_first:  ${{ steps.export.outputs.delete_first }}
+      migrate_mrs:   ${{ steps.export.outputs.migrate_mrs }}
+      migrate_issues:${{ steps.export.outputs.migrate_issues }}
     env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      IN_GL_URL: ${{ inputs.gl_url }}
-      IN_GL_GROUP: ${{ inputs.gl_group }}
-      IN_INCLUDE_SUBGROUPS: ${{ inputs.include_subgroups }}
-      IN_GH_OWNER: ${{ inputs.gh_owner }}
-      IN_AUTO_CREATE: ${{ inputs.auto_create_repo }}
-      IN_DELETE_FIRST: ${{ inputs.delete_dest_repo_first }}
-      IN_MIGRATE_MRS: ${{ inputs.migrate_mrs }}
-      IN_MIGRATE_ISSUES: ${{ inputs.migrate_issues }}
+      GL_TOKEN:              ${{ secrets.GITLAB_TOKEN }}
+      IN_GL_URL:             ${{ inputs.gl_url }}
+      IN_GL_GROUP:           ${{ inputs.gl_group }}
+      IN_INCLUDE_SUBGROUPS:  ${{ inputs.include_subgroups }}
+      IN_GH_OWNER:           ${{ inputs.gh_owner }}
+      IN_AUTO_CREATE:        ${{ inputs.auto_create_repo }}
+      IN_DELETE_FIRST:       ${{ inputs.delete_dest_repo_first }}
+      IN_MIGRATE_MRS:        ${{ inputs.migrate_mrs }}
+      IN_MIGRATE_ISSUES:     ${{ inputs.migrate_issues }}
     steps:
       - name: Install jq & curl
         run: |
@@ -101,7 +102,7 @@ jobs:
             echo "migrate_issues=${MIGRATE_ISSUES}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build project matrix from GitLab group
+      - name: Build matrix from GitLab group (simple JSON array)
         id: build
         shell: bash
         run: |
@@ -113,44 +114,46 @@ jobs:
           GL_GROUP_ENC="$(jq -rn --arg x "$IN_GL_GROUP" '$x|@uri')"
           INC_SUB="${IN_INCLUDE_SUBGROUPS:-true}"
 
-          ITEMS="$(mktemp)"
+          TMP_LIST="$(mktemp)"
           page=1
           while true; do
             RESP="$(mktemp)"; HDR="$(mktemp)"
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/groups/$GL_GROUP_ENC/projects?include_subgroups=$INC_SUB&per_page=100&page=$page" > "$RESP"
 
-            # Extract GitLab path_with_namespace and repo path (last segment)
-            jq -c '.[] | {gl_project: .path_with_namespace, gh_repo: .path}' "$RESP" >> "$ITEMS"
+            # Capture `{gl_project, gh_repo}` for each project
+            jq -c '.[] | {gl_project: .path_with_namespace, gh_repo: .path}' "$RESP" >> "$TMP_LIST"
 
             next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')"
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
           done
 
-          MATRIX_JSON="$(jq -s '{include: .}' "$ITEMS")"
-          echo "project_matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          # Build a plain JSON array (no wrapper object)
+          MATRIX_ARRAY="$(jq -s '.' "$TMP_LIST")"
+          echo "matrix_entries=${MATRIX_ARRAY}" >> "$GITHUB_OUTPUT"
 
-  # 1) Per-project migration (parallelized via dynamic matrix)
+  # 1) Per-project migration (parallel via dynamic matrix.include)
   migrate_repo:
     name: "1) Migrate project → ${{ matrix.gh_repo }}"
     needs: list_projects
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.list_projects.outputs.project_matrix) }}
+      matrix:
+        include: ${{ fromJson(needs.list_projects.outputs.matrix_entries) }}
     env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT: ${{ secrets.GH_PAT }}
-      GL_URL: ${{ needs.list_projects.outputs.gl_url }}
-      GH_OWNER: ${{ needs.list_projects.outputs.gh_owner }}
-      AUTO_CREATE: ${{ needs.list_projects.outputs.auto_create }}
+      GL_TOKEN:     ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:       ${{ secrets.GH_PAT }}
+      GL_URL:       ${{ needs.list_projects.outputs.gl_url }}
+      GH_OWNER:     ${{ needs.list_projects.outputs.gh_owner }}
+      AUTO_CREATE:  ${{ needs.list_projects.outputs.auto_create }}
       DELETE_FIRST: ${{ needs.list_projects.outputs.delete_first }}
-      MIGRATE_MRS: ${{ needs.list_projects.outputs.migrate_mrs }}
-      MIGRATE_ISSUES: ${{ needs.list_projects.outputs.migrate_issues }}
-      GL_PROJECT: ${{ matrix.gl_project }}
-      GH_REPO: ${{ matrix.gh_repo }}
-      WORKDIR: /tmp/mirror-work
+      MIGRATE_MRS:  ${{ needs.list_projects.outputs.migrate_mrs }}
+      MIGRATE_ISSUES:${{ needs.list_projects.outputs.migrate_issues }}
+      GL_PROJECT:   ${{ matrix.gl_project }}
+      GH_REPO:      ${{ matrix.gh_repo }}
+      WORKDIR:      /tmp/mirror-work
     steps:
       - name: Install tools
         shell: bash
@@ -370,7 +373,6 @@ jobs:
           : "${GH_OWNER:?GH_OWNER is empty}"
           : "${GH_REPO:?GH_REPO is empty}"
 
-          # Use a quoted here-doc to avoid HTML entity leakage and quoting issues
           cat > milestones.sh <<'BASH'
           set -euo pipefail
           page=1
@@ -409,7 +411,6 @@ jobs:
           : "${GH_OWNER:?GH_OWNER is empty}"
           : "${GH_REPO:?GH_REPO is empty}"
 
-          # Use a quoted here-doc to avoid HTML entity leakage and quoting issues
           cat > issues.sh <<'BASH'
           set -euo pipefail
           page=1
@@ -481,9 +482,9 @@ jobs:
                 cpage="$nnext"
               done
             done
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+                       next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
-                       page="$next"
+            page="$next"
           done
           BASH
 
