@@ -1,0 +1,97 @@
+
+name: 1) Repo Migration · 1.1 Commit Sync
+on:
+  workflow_call:
+    inputs:
+      gl_url:     { required: true, type: string }
+      gl_project: { required: true, type: string }
+      gh_owner:   { required: true, type: string }
+      gh_repo:    { required: true, type: string }
+      auto_create:{ required: true, type: boolean }
+      delete_first:{ required: true, type: boolean }
+    secrets:
+      GITLAB_TOKEN: { required: true }
+      GH_PAT:       { required: true }
+
+jobs:
+  commit-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl git git-lfs
+
+      - name: Resolve config & validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          GL_URL="${{ inputs.gl_url }}"
+          GL_PROJECT="${{ inputs.gl_project }}"
+          GH_OWNER="${{ inputs.gh_owner }}"
+          GH_REPO="${{ inputs.gh_repo }}"
+          AUTO_CREATE="${{ inputs.auto_create }}"
+          DELETE_FIRST="${{ inputs.delete_first }}"
+
+          [[ -z "${GL_PROJECT}" ]] && { echo "GL_PROJECT required"; exit 1; }
+          [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]] && { echo "GH_OWNER/GH_REPO required"; exit 1; }
+
+      - name: Optionally delete destination repo
+        if: ${{ inputs.delete_first }}
+        shell: bash
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://api.github.com/repos/${{ inputs.gh_owner }}/${{ inputs.gh_repo }}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" "${REPO_URL}")
+          echo "Delete HTTP status: ${STATUS}"
+          [[ "${STATUS}" == "204" || "${STATUS}" == "404" ]] || { echo "Delete failed"; exit 1; }
+
+      - name: Create GitHub repo if missing
+        if: ${{ inputs.auto_create }}
+        shell: bash
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${{ inputs.gh_owner }}/${{ inputs.gh_repo }}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${API}")
+          if [[ "${STATUS}" != "200" ]]; then
+            MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
+            if [[ "${{ inputs.gh_owner }}" == "${MY_LOGIN}" ]]; then
+              CREATE_URL="https://api.github.com/user/repos"
+            else
+              CREATE_URL="https://api.github.com/orgs/${{ inputs.gh_owner }}/repos"
+            fi
+            PAYLOAD=$(jq -n --arg name "${{ inputs.gh_repo }}" \
+              '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
+            RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
+              -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
+              -d "${PAYLOAD}" "${CREATE_URL}")
+            HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
+            [[ "${HTTP}" == "201" ]] || { echo "Failed to create repo (HTTP ${HTTP})."; exit 1; }
+          fi
+          echo "GH repo ready: https://github.com/${{ inputs.gh_owner }}/${{ inputs.gh_repo }}"
+
+      - name: Mirror clone from GitLab and push to GitHub (incl. LFS)
+        shell: bash
+        env:
+          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GH_PAT:   ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          WORKDIR=/tmp/mirror-work
+          mkdir -p "${WORKDIR}"
+          HOST="${{ inputs.gl_url#*:// }}"
+          SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${{ inputs.gl_project }}.git"
+
+          git clone --mirror "${SRC_URL}" "${WORKDIR}/src.git"
+          PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${{ inputs.gh_owner }}/${{ inputs.gh_repo }}.git"
+          git -C "${WORKDIR}/src.git" remote add github "${PUSH_URL}"
+          git -C "${WORKDIR}/src.git" push --mirror github
+
+          # LFS objects
+          git lfs install
+          git -C "${WORKDIR}/src.git          git -C "${WORKDIR}/src.git" lfs fetch --all
