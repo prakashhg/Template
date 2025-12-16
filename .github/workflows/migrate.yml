@@ -3,14 +3,14 @@ name: Mirroring (GitLab → GitHub) + Trackers migration [Production]
 
 on:
   workflow_dispatch:
+env:
+  # Working dir
+  WORKDIR: /tmp/mirror-work
 
 permissions:
   contents: write
   issues: write
   pull-requests: write
-
-  # Working dir
-  WORKDIR: /tmp/mirror-work
 
 jobs:
   # 1) Repo Migration · 1.1 Commit Sync
