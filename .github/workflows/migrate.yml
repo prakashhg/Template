@@ -12,3 +12,6 @@ jobs:
   label_sync:
     uses: ./.github/workflows/label_sync.yml
   milestone_sync:
+    uses: ./.github/workflows/milestone_sync.yml
+  issue_sync:
+    uses: ./.github/workflows/issue_sync.yml
