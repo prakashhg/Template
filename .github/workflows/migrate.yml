@@ -1,83 +1,185 @@
+
 name: Mirroring (GitLab → GitHub)
 
 on:
-  # same triggers you used; you can remove push/delete if you want manual only
-  [push, delete, workflow_dispatch]
+  # Keep all triggers; you can remove push/delete if you want manual-only.
+  push:
+  delete:
+  workflow_dispatch:
+    inputs:
+      gl_url:
+        description: "GitLab base URL (e.g., https://gitlab.com)"
+        required: false
+        type: string
+      gl_project:
+        description: "GitLab project path (e.g., group/subgroup/repo)"
+        required: false
+        type: string
+      gh_owner:
+        description: "GitHub user/org owner (e.g., prakashhg)"
+        required: false
+        type: string
+      gh_repo:
+        description: "GitHub repository name (e.g., my_project)"
+        required: false
+        type: string
+      auto_create_repo:
+        description: "Create destination repo if missing? (true/false)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: write
 
 jobs:
   to_github:
     runs-on: ubuntu-latest
+
+    # Secrets at job level
+    env:
+      GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}   # GitLab PAT
+      GH_PAT:    ${{ secrets.GH_PAT }}         # GitHub PAT
+
+      # Repo/Org Variables (avoid GITHUB_* prefix)
+      VAR_GL_URL:   ${{ vars.GL_URL }}
+      VAR_GL_PROJ:  ${{ vars.GL_PROJECT }}
+      VAR_GH_OWNER: ${{ vars.GH_OWNER }}
+      VAR_GH_REPO:  ${{ vars.GH_REPO }}
+      VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
+
+      # workflow_dispatch inputs (empty on push/delete)
+      IN_GL_URL:    ${{ inputs.gl_url }}
+      IN_GL_PROJ:   ${{ inputs.gl_project }}
+      IN_GH_OWNER:  ${{ inputs.gh_owner }}
+      IN_GH_REPO:   ${{ inputs.gh_repo }}
+      IN_AUTO_CREATE: ${{ inputs.auto_create_repo }}
+
     steps:
-      - name: Install tools
+      - name: Print runner & git version
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl
+          echo "Runner: $(uname -a)"
           git --version
 
-      # Clone the source repo from GitLab in mirror mode
-      - name: Clone GitLab mirror
-        env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      - name: Install tools
         run: |
           set -euo pipefail
-          # ---- configure your source here ----
-          GITLAB_URL="https://gitlab.com"
-          GITLAB_PROJECT="prakashguruswamy24-group/my_project"   # <--- change if needed
-          WORKDIR="/tmp/mirror-work"
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+
+      - name: Resolve configuration
+        id: cfg
+        run: |
+          set -euo pipefail
+
+          # Precedence: Inputs > Variables > Defaults
+          GL_URL="${IN_GL_URL:-${VAR_GL_URL:-https://gitlab.com}}"
+          GL_PROJECT="${IN_GL_PROJ:-${VAR_GL_PROJ:-}}"
+          GH_OWNER="${IN_GH_OWNER:-${VAR_GH_OWNER:-}}"
+          GH_REPO="${IN_GH_REPO:-${VAR_GH_REPO:-}}"
+          AUTO_CREATE="${IN_AUTO_CREATE:-${VAR_AUTO_CREATE:-true}}"
+
+          # Validation
+          if [[ -z "${GL_PROJECT}" ]]; then
+            echo "❌ GL_PROJECT is required (input 'gl_project' or variable 'GL_PROJECT')."
+            exit 1
+          fi
+          if [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]]; then
+            echo "❌ GH_OWNER and GH_REPO are required (inputs or variables)."
+            exit 1
+          fi
+          if [[ -z "${GL_TOKEN:-}" ]]; then
+            echo "❌ Missing secret GITLAB_TOKEN."
+            exit 1
+          fi
+          if [[ -z "${GH_PAT:-}" ]]; then
+            echo "❌ Missing secret GH_PAT."
+            exit 1
+          fi
+
+          # Export for later steps
+          {
+            echo "GL_URL=${GL_URL}"
+            echo "GL_PROJECT=${GL_PROJECT}"
+            echo "GH_OWNER=${GH_OWNER}"
+            echo "GH_REPO=${GH_REPO}"
+            echo "AUTO_CREATE=${AUTO_CREATE}"
+            echo "WORKDIR=/tmp/mirror-work"
+          } >> "$GITHUB_ENV"
+
+          echo "Using:"
+          echo " - GL_URL=${GL_URL}"
+          echo " - GL_PROJECT=${GL_PROJECT}"
+          echo " - GH_OWNER=${GH_OWNER}"
+          echo " - GH_REPO=${GH_REPO}"
+          echo " - AUTO_CREATE=${AUTO_CREATE}"
+
+      - name: Clone GitLab mirror
+        run: |
+          set -euo pipefail
           mkdir -p "${WORKDIR}"
           cd "${WORKDIR}"
-          HOST="${GITLAB_URL#https://}"
-          SRC_URL="https://oauth2:${GITLAB_TOKEN}@${HOST}/${GITLAB_PROJECT}.git"
-          echo "Cloning --mirror from ${SRC_URL}"
+
+          HOST="${GL_URL#https://}"
+          SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${GL_PROJECT}.git"
+
+          echo "Cloning --mirror from ${GL_URL}/${GL_PROJECT}"
           git clone --mirror "${SRC_URL}" src.git
+
           echo "Refs (preview):"
           git -C src.git show-ref | head -n 10 || true
 
-      # Optionally create destination repo on GitHub if it doesn't exist
-      - name: Create GitHub repo if missing
+      - name: Create GitHub repo if missing (optional)
+        if: env.AUTO_CREATE == 'true'
         env:
-          GITHUB_PAT: ${{ secrets.GIT_TOKEN }}
+          GH_OWNER: ${{ env.GH_OWNER }}
+          GH_REPO:  ${{ env.GH_REPO }}
+          GH_PAT:   ${{ env.GH_PAT }}
         run: |
           set -euo pipefail
-          OWNER="prakashhg"            # <--- change if needed
-          REPO="my_project"            # <--- change if needed
-          REPO_API="https://api.github.com/repos/${OWNER}/${REPO}"
+
+          REPO_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer ${GITHUB_PAT}" "${REPO_API}")
+            -H "Authorization: Bearer ${GH_PAT}" "${REPO_API}")
+
           if [ "${STATUS}" = "200" ]; then
             echo "Repo already exists on GitHub."
             exit 0
           fi
-          # Decide endpoint: user vs org
-          MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GITHUB_PAT}" https://api.github.com/user | jq -r '.login')
-          if [ "${OWNER}" = "${MY_LOGIN}" ]; then
+
+          # Determine endpoint: user vs org
+          MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
+          if [ "${GH_OWNER}" = "${MY_LOGIN}" ]; then
             CREATE_URL="https://api.github.com/user/repos"
           else
-            CREATE_URL="https://api.github.com/orgs/${OWNER}/repos"
+            CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
           fi
-          PAYLOAD='{"name":"'"${REPO}"'","private":true,"has_issues":true,"has_projects":true,"has_wiki":true}'
+
+          PAYLOAD=$(jq -n --arg name "${GH_REPO}" \
+            '{name: $name, private: true, has_issues: true, has_projects: true, has_wiki: true}')
+
           CREATE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer ${GITHUB_PAT}" \
+            -H "Authorization: Bearer ${GH_PAT}" \
             -H "Content-Type: application/json" \
             -d "${PAYLOAD}" \
             "${CREATE_URL}")
-          if [ "${CREATE_STATUS}" != "201" ]; then
-            echo "Failed to create GitHub repo (HTTP ${CREATE_STATUS})."; exit 1
-          fi
-          echo "GitHub repo created: https://github.com/${OWNER}/${REPO}"
 
-      # Push the mirror to GitHub
+          if [ "${CREATE_STATUS}" != "201" ]; then
+            echo "Failed to create GitHub repo (HTTP ${CREATE_STATUS})."
+            exit 1
+          fi
+
+          echo "GitHub repo created: https://github.com/${GH_OWNER}/${GH_REPO}"
+
       - name: Push mirror to GitHub
-        env:
-          GITHUB_PAT: ${{ secrets.GIT_TOKEN }}
         run: |
           set -euo pipefail
-          OWNER="prakashhg"      # <--- change if needed
-          REPO="my_project"      # <--- change if needed
-          cd /tmp/mirror-work/src.git
-          PUSH_URL="https://x-access-token:${GITHUB_PAT}@github.com/${OWNER}/${REPO}.git"
+          cd "${WORKDIR}/src.git"
+
+          PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
+
           git remote remove github 2>/dev/null || true
           git remote add github "${PUSH_URL}"
-          echo "Pushing --mirror to ${OWNER}/${REPO}…"
-          git push --mirror github
-         
+
+          echo "Pushing --mirror to ${GH_OWNER}/${GH          echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}…"
