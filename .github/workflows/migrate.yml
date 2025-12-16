@@ -216,8 +216,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -284,8 +284,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -421,8 +421,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -505,8 +505,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -588,7 +588,7 @@ jobs:
           BASH
 
           # Guard: fail fast if any HTML entities got injected by editor
-                   if grep -Eq '&amp;|&lt;|&gt;' milestones.sh; then
+          if grep -Eq '&amp;|&lt;|&gt;' milestones.sh; then
             echo "ERROR: Detected HTML-escaped characters in milestones.sh (e.g., &amp;, &lt;, &gt;)."
             echo "Please ensure the workflow is saved as plain text without HTML escaping."
             echo "---- offending lines ----"
@@ -596,3 +596,4 @@ jobs:
             exit 1
           fi
 
+         
