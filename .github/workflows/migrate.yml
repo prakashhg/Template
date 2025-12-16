@@ -398,89 +398,45 @@ jobs:
 
           bash milestones.sh
 
-      - name: Migrate issues + comments (GitLab → GitHub) [robust]
-        if: env.MIGRATE_ISSUES == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${GL_API:?GL_API is empty}"
-          : "${GL_ENC:?GL_ENC is empty}"
-          : "${GH_OWNER:?GH_OWNER is empty}"
-          : "${GH_REPO:?GH_REPO is empty}"
+      
+- name: Migrate issues and comments
+  shell: bash
+  run: |
+    set -euo pipefail
+    : "${GL_API:?GL_API is empty}"
+    : "${GL_ENC:?GL_ENC is empty}"
+    : "${GH_OWNER:?GH_OWNER is empty}"
+    : "${GH_REPO:?GH_REPO is empty}"
 
-          cat > issues.sh <<'BASH'
-          set -euo pipefail
-          page=1
-          while true; do
-            RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
-              "$GL_API/projects/$GL_ENC/issues?scope=all&per_page=100&page=$page" > "$RESP"
-            jq -c '.[]' "$RESP" | while read -r is; do
-              title=$(jq -r '.title' <<< "$is")
-              body=$(jq -r '.description // ""' <<< "$is")
-              state=$(jq -r '.state' <<< "$is")
-              labels=$(jq -c '.labels' <<< "$is")
-              ml_title=$(jq -r '.milestone.title // empty' <<< "$is")
-              author=$(jq -r '.author.username' <<< "$is")
+    cat > issues.sh <<'BASH'
+    set -euo pipefail
+    page=1
+    while true; do
+      RESP=$(mktemp) ; HDR=$(mktemp)
+      curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
+        "$GL_API/projects/$GL_ENC/issues?scope=all&per_page=100&page=$page" > "$RESP"
 
-              payload=$(jq -n --arg title "$title" \
-                              --arg body "**Imported from GitLab by @$author**\n\n$body" \
-                              --argjson labels "$labels" \
-                              '{title:$title, body:$body, labels:$labels}')
+      jq -c '.[]' "$RESP" | while read -r is; do
+        title=$(jq -r '.title' <<< "$is")
+        body=$(jq -r '.description // ""' <<< "$is")
+        labels=$(jq -c '.labels' <<< "$is")
+        author=$(jq -r '.author.username' <<< "$is")
 
-              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                -d "$payload" \
-                "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues")
-              http=$(echo "$CREATE" | sed -n 's/^HTTP_STATUS://p')
-              gh_issue_number=$(echo "$CREATE" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
-              echo "Issue create status=$http number=$gh_issue_number"
+        payload=$(jq -n --arg title "$title" \
+                        --arg body "**Imported from GitLab by @$author**\n\n$body" \
+                        --argjson labels "$labels" \
+                        '{title:$title, body:$body, labels:$labels}')
 
-              if [[ -n "$ml_title" && -n "$gh_issue_number" ]]; then
-                mid=$(
-                  curl -s -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/milestones" \
-                  | jq -r --arg t "$ml_title" '.[] | select(.title==$t) | .number' | head -n1
-                )
-                if [[ -n "$mid" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PATCH \
-                    -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                    -d "$(jq -n --argjson m "$mid" '{milestone:$m}')" \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$gh_issue_number"
-                  sleep 1
-                fi
-              fi
+        CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+          -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
+          -d "$payload" "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues")
+        http=$(echo "$CREATE" | sed -n 's/^HTTP_STATUS://p')
+        gh_issue_number=$(echo "$CREATE" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
+        echo "Issue create status=$http number=$gh_issue_number"
+      done
 
-              if [[ "$state" == "closed" && -n "$gh_issue_number" ]]; then
-                curl -s -o /dev/null -w "%{http_code}" -X PATCH \
-                  -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                  -d '{"state":"closed"}' \
-                  "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$gh_issue_number"
-                sleep 1
-              fi
-
-              gl_iid=$(jq -r '.iid' <<< "$is")
-              cpage=1
-              while true; do
-                CRESP=$(mktemp) ; CHDR=$(mktemp)
-                curl -s -D "$CHDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
-                  "$GL_API/projects/$GL_ENC/issues/$gl_iid/notes?activity_filter=only_comments&per_page=100&page=$cpage" > "$CRESP"
-                jq -c '.[]' "$CRESP" | while read -r note; do
-                  nbody=$(jq -r '.body' <<< "$note")
-                  nauth=$(jq -r '.author.username' <<< "$note")
-                  curl -s -o /dev/null -w "%{http_code}" \
-                    -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
-                    -d "$(jq -n --arg b "**@$nauth (from GitLab)**\n\n$nbody" '{body:$b}')" \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$gh_issue_number/comments"
-                  sleep 1
-                done
-                nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$CHDR" | tr -d '\r')
-                [[ -z "$nnext" || "$nnext" == "0" ]] && break
-                cpage="$nnext"
-              done
-            done
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-            [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
-          done
-          BASH
+      next=$(      next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+      [[ -z "$next" || "$next" == "0" ]] && break
+      page="$next"
+    done
+    BASH
