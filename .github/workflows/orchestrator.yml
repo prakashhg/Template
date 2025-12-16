@@ -55,12 +55,12 @@ jobs:
     name: "1) Repo Migration · 1.1 Commit Sync"
     uses: ./.github/workflows/1-01_commit_sync.yml
     with:
-      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
-      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
-      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
-      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
-      auto_create_repo: ${{ inputs.auto_create_repo || vars.AUTO_CREATE_REPO || 'true' }}
-      delete_dest_repo_first: ${{ inputs.delete_dest_repo_first || vars.DELETE_DEST_REPO_FIRST || 'false' }}
+      gl_url:               ${{ inputs.gl_url }}
+      gl_project:           ${{ inputs.gl_project }}
+      gh_owner:             ${{ inputs.gh_owner }}
+      gh_repo:              ${{ inputs.gh_repo }}
+      auto_create_repo:     ${{ inputs.auto_create_repo }}
+      delete_dest_repo_first: ${{ inputs.delete_dest_repo_first }}
     secrets: inherit
 
   stage_tag:
@@ -68,22 +68,23 @@ jobs:
     needs: stage_commit
     uses: ./.github/workflows/1-02_tag_sync.yml
     with:
-      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
-      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
-      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
-      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+      gl_url:     ${{ inputs.gl_url }}
+      gl_project: ${{ inputs.gl_project }}
+      gh_owner:   ${{ inputs.gh_owner }}
+      gh_repo:    ${{ inputs.gh_repo }}
     secrets: inherit
 
   stage_pr:
     name: "1) Repo Migration · 1.3 PR Sync (MR → PR)"
     needs: stage_tag
-    if: ${{ inputs.migrate_mrs == 'true' || vars.MIGRATE_MRS == 'true' }}
+    # Respect toggle
+    if: ${{ inputs.migrate_mrs == 'true' }}
     uses: ./.github/workflows/1-03_pr_sync.yml
     with:
-      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
-      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
-      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
-      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+      gl_url:     ${{ inputs.gl_url }}
+      gl_project: ${{ inputs.gl_project }}
+      gh_owner:   ${{ inputs.gh_owner }}
+      gh_repo:    ${{ inputs.gh_repo }}
     secrets: inherit
 
   stage_label:
@@ -91,10 +92,10 @@ jobs:
     needs: stage_pr
     uses: ./.github/workflows/1-04_label_sync.yml
     with:
-      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
-      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
-      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
-      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+      gl_url:     ${{ inputs.gl_url }}
+      gl_project: ${{ inputs.gl_project }}
+      gh_owner:   ${{ inputs.gh_owner }}
+      gh_repo:    ${{ inputs.gh_repo }}
     secrets: inherit
 
   stage_milestone:
@@ -102,21 +103,20 @@ jobs:
     needs: stage_label
     uses: ./.github/workflows/1-05_milestone_sync.yml
     with:
-      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
-      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
-      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
-      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+      gl_url:     ${{ inputs.gl_url }}
+      gl_project: ${{ inputs.gl_project }}
+      gh_owner:   ${{ inputs.gh_owner }}
+      gh_repo:    ${{ inputs.gh_repo }}
     secrets: inherit
 
   stage_issue:
     name: "1) Repo Migration · 1.6 Issue Sync"
     needs: stage_milestone
-    if: ${{ inputs.migrate_issues == 'true' || vars.MIGRATE_ISSUES == 'true' }}
+    # Respect toggle
+    if: ${{ inputs.migrate_issues == 'true' }}
     uses: ./.github/workflows/1-06_issue_sync.yml
     with:
-      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
-      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
-      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
-      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
-    secrets: inherit
-``
+      gl_url:     ${{ inputs.gl_url }}
+           gl_project: ${{ inputs.gl_project }}
+      gh_owner:   ${{ inputs.gh_owner }}
+      gh_repo:    ${{ inputs.gh_repo }}
