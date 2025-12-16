@@ -394,7 +394,7 @@ jobs:
             page="$next"
           done
 
-  # 1) Repo Migration · 1.5 Milestone Sync (corrected)
+  # 1) Repo Migration · 1.5 Milestone Sync (robust to HTML entities)
   repo_migration_milestone_sync:
     name: "1) Repo Migration · 1.5 Milestone Sync"
     needs: [repo_migration_commit_sync, repo_migration_label_sync]
@@ -432,11 +432,15 @@ jobs:
           : "${GH_OWNER:?GH_OWNER is empty}"
           : "${GH_REPO:?GH_REPO is empty}"
 
+          # Write the logic to a script via a quoted here-doc to avoid any HTML escaping.
+          cat > milestones.sh <<'BASH'
+          set -euo pipefail
+
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
 
-            # RAW '&' in query string; no HTML entities
+            # RAW '&' in query string (NO HTML entities)
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/projects/$GL_ENC/milestones?per_page=100&page=$page" > "$RESP"
 
@@ -445,7 +449,7 @@ jobs:
               description=$(jq -r '.description // empty' <<< "$ms")
               due=$(jq -r '.due_date // empty' <<< "$ms")
 
-              # GitHub expects 'due_on' (ISO 8601). Build JSON safely.
+              # Build JSON safely with jq; GitHub expects 'due_on' (ISO-8601)
               payload=$(jq -n --arg title "$title" --arg desc "$description" --arg due "$due" \
                 '{title:$title, description:$desc} + ( ($due|length>0) ? {due_on:$due} : {} )')
 
@@ -454,10 +458,13 @@ jobs:
                 -H "Accept: application/vnd.github+json" \
                 -d "$payload" \
                 "https://api.github.com/repos/$GH_OWNER/$GH_REPO/milestones")
+
               echo "Milestone $title status: $status"
               sleep 1
             done
 
-                       next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
+          done
+          BASH
