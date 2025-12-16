@@ -484,6 +484,3 @@ jobs:
             page="$next"
           done
           BASH
-
-          bash issues.sh
-``
