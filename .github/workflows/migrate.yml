@@ -65,7 +65,7 @@ jobs:
       auto_create:   ${{ steps.export.outputs.auto_create }}
       delete_first:  ${{ steps.export.outputs.delete_first }}
       migrate_mrs:   ${{ steps.export.outputs.migrate_mrs }}
-      migrate_issues:${{ steps.export.outputs.migrate_issues }}
+      migrate_issues: ${{ steps.export.outputs.migrate_issues }}
     env:
       GL_TOKEN:              ${{ secrets.GITLAB_TOKEN }}
       IN_GL_URL:             ${{ inputs.gl_url }}
@@ -143,17 +143,17 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.list_projects.outputs.matrix_entries) }}
     env:
-      GL_TOKEN:     ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:       ${{ secrets.GH_PAT }}
-      GL_URL:       ${{ needs.list_projects.outputs.gl_url }}
-      GH_OWNER:     ${{ needs.list_projects.outputs.gh_owner }}
-      AUTO_CREATE:  ${{ needs.list_projects.outputs.auto_create }}
-      DELETE_FIRST: ${{ needs.list_projects.outputs.delete_first }}
-      MIGRATE_MRS:  ${{ needs.list_projects.outputs.migrate_mrs }}
-      MIGRATE_ISSUES:${{ needs.list_projects.outputs.migrate_issues }}
-      GL_PROJECT:   ${{ matrix.gl_project }}
-      GH_REPO:      ${{ matrix.gh_repo }}
-      WORKDIR:      /tmp/mirror-work
+      GL_TOKEN:      ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:        ${{ secrets.GH_PAT }}
+      GL_URL:        ${{ needs.list_projects.outputs.gl_url }}
+      GH_OWNER:      ${{ needs.list_projects.outputs.gh_owner }}
+      AUTO_CREATE:   ${{ needs.list_projects.outputs.auto_create }}
+      DELETE_FIRST:  ${{ needs.list_projects.outputs.delete_first }}
+      MIGRATE_MRS:   ${{ needs.list_projects.outputs.migrate_mrs }}
+      MIGRATE_ISSUES: ${{ needs.list_projects.outputs.migrate_issues }}
+      GL_PROJECT:    ${{ matrix.gl_project }}
+      GH_REPO:       ${{ matrix.gh_repo }}
+      WORKDIR:       /tmp/mirror-work
     steps:
       - name: Install tools
         shell: bash
@@ -373,6 +373,7 @@ jobs:
           : "${GH_OWNER:?GH_OWNER is empty}"
           : "${GH_REPO:?GH_REPO is empty}"
 
+          # Use a quoted here-doc to avoid HTML entity leakage and quoting issues
           cat > milestones.sh <<'BASH'
           set -euo pipefail
           page=1
@@ -411,6 +412,7 @@ jobs:
           : "${GH_OWNER:?GH_OWNER is empty}"
           : "${GH_REPO:?GH_REPO is empty}"
 
+          # Use a quoted here-doc to avoid HTML entity leakage and quoting issues
           cat > issues.sh <<'BASH'
           set -euo pipefail
           page=1
@@ -476,13 +478,13 @@ jobs:
                     -d "$(jq -n --arg b "**@$nauth (from GitLab)**\n\n$nbody" '{body:$b}')" \
                     "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$gh_issue_number/comments"
                   sleep 1
-                done
+                               done
                 nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$CHDR" | tr -d '\r')
                 [[ -z "$nnext" || "$nnext" == "0" ]] && break
                 cpage="$nnext"
               done
             done
-                       next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
           done
