@@ -97,4 +97,3 @@ jobs:
           git lfs install
           git -C "${WORKDIR}/src.git" lfs fetch --all
           git -C "${WORKDIR}/src.git" lfs push "${PUSH_URL}" --all
-``
