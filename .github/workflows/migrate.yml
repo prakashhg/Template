@@ -335,5 +335,3 @@ jobs:
             page="$next"
           done
           BASH
-          bash milestones.sh
-``
