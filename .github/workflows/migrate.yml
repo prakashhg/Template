@@ -1,16 +1,58 @@
 
-name: GitLab → GitHub Migration (Main)
-
+name: "GitLab → GitHub Migration (orchestrator)"
 on:
   workflow_dispatch:
+    inputs:
+      gl_url:
+        description: "GitLab base URL (e.g., https://gitlab.com)"
+        required: false
+        type: string
+      gl_project:
+        description: "GitLab project path (e.g., group/subgroup/repo)"
+        required: true
+        type: string
+      gh_owner:
+        description: "GitHub user/org owner (e.g., prakashhg)"
+        required: true
+        type: string
+      gh_repo:
+        description: "GitHub repository name (e.g., my_project)"
+        required: true
+        type: string
+      auto_create_repo:
+        description: "Create destination repo if missing? (true/false)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      delete_dest_repo_first:
+        description: "Delete destination repo before mirroring? (true/false)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      migrate_mrs:
+        description: "Migrate Merge Requests → Pull Requests (true/false)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
 jobs:
   commit-sync:
-    uses: ./.github/workflows/commit_sync.yml
+    uses: ./.github/workflows/repo_commit_sync.yml
     with:
-      gl_url:     ${{ inputs.gl_url }}
+      gl_url: ${{ inputs.gl_url }}
       gl_project: ${{ inputs.gl_project }}
-      gh_owner:   ${{ inputs.gh_owner }}
-      gh_repo:    ${{ inputs.gh_repo }}
-      auto_create: ${{ inputs.auto_create }}
-      delete_first: ${{ inputs.delete_first }}
-    secrets: inherit
+      gh_owner: ${{ inputs.gh_owner }}
+      gh_repo: ${{ inputs.gh_repo }}
+      auto_create_repo: ${{ inputs.auto_create_repo }}
+      delete_dest_repo_first: ${{ inputs.delete_dest_repo_first }}
+      migrate_mrs: ${{ inputs.migrate_mrs }}
+    secrets:
+      GH_PAT: ${{ secrets.GH_PAT }}
+      GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
