@@ -82,17 +82,14 @@ jobs:
           mkdir -p "${WORKDIR}"
           HOST="${GL_URL#*://}"
           SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${GL_PROJECT}.git"
-
           echo "Cloning --mirror from ${GL_URL}/${GL_PROJECT}"
           git clone --mirror "${SRC_URL}" "${WORKDIR}/src.git"
           git -C "${WORKDIR}/src.git" show-ref | head -n 10 || true
-
           PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
           git -C "${WORKDIR}/src.git" remote remove github 2>/dev/null || true
           git -C "${WORKDIR}/src.git" remote add github "${PUSH_URL}"
           echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
           git -C "${WORKDIR}/src.git" push --mirror github
-
           # LFS handling (optional but recommended if source uses LFS)
           git lfs install
           git -C "${WORKDIR}/src.git" lfs fetch --all
