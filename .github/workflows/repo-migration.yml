@@ -301,7 +301,7 @@ jobs:
             jq -c '.[]' "${RESP}" | while read -r mr; do
               title=$(jq -r '.title' <<< "${mr}")
               body=$(jq -r '.description // ""' <<< "${mr}")
-              state=$(jq -r '.state' <<< "${mr}")
+              state=$(jq -r '.state' <<< "${mr}")  # opened/closed/merged
               labels=$(jq -c '.labels' <<< "${mr}")
               source_branch=$(jq -r '.source_branch' <<< "${mr}")
               target_branch=$(jq -r '.target_branch' <<< "${mr}")
@@ -315,21 +315,33 @@ jobs:
                 continue
               fi
 
-              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -d "$(jq -n --arg title "${title}" --arg body "**Imported from GitLab by @${author}**\n\n${body}" --arg head "${source_branch}" --arg base "${target_branch}" '{title:$title, body:$body, head:$head, base:$base}')" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls")
+              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+                -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                -d "$(jq -n --arg title "${title}" --arg body "**Imported from GitLab by @${author}**\n\n${body}" --arg head "${source_branch}" --arg base "${target_branch}" '{title:$title, body:$body, head:$head, base:$base}')" \
+                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls")
               http=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
               pr_num=$(echo "${CREATE}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
               echo "PR create status=${http} number=${pr_num}"
 
               if [[ -n "${pr_num}" && "${labels}" != "null" ]]; then
-                curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -d "${labels}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/labels"
+                curl -s -o /dev/null -w "%{http_code}" \
+                  -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                  -d "${labels}" \
+                  "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/labels"
                 sleep 1
               fi
 
               if [[ -n "${pr_num}" ]]; then
                 if [[ "${state}" == "closed" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -d '{"state":"closed"}' "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}"
-                elif [[ "${state}" == "merged" }}; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -d '{"merge_method":"merge"}' "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls/${pr_num}/merge"
+                  curl -s -o /dev/null -w "%{http_code}" -X PATCH \
+                    -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                    -d '{"state":"closed"}' \
+                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}"
+                elif [[ "${state}" == "merged" ]]; then
+                  curl -s -o /dev/null -w "%{http_code}" -X PUT \
+                    -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                    -d '{"merge_method":"merge"}' \
+                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls/${pr_num}/merge"
                 fi
                 sleep 1
               fi
@@ -341,7 +353,10 @@ jobs:
                 jq -c '.[]' "${CRESP}" | while read -r note; do
                   nbody=$(jq -r '.body' <<< "${note}")
                   nauth=$(jq -r '.author.username' <<< "${note}")
-                  curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -d "$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/comments"
+                  curl -s -o /dev/null -w "%{http_code}" \
+                    -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                    -d "$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')" \
+                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/comments"
                   sleep 1
                 done
                 nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${CHDR}" | tr -d '\r')
@@ -510,11 +525,14 @@ jobs:
             jq -c '.[]' "${RESP}" | while read -r is; do
               title=$(jq -r '.title' <<< "${is}")
               body=$(jq -r '.description // ""' <<< "${is}")
-              state=$(jq -r '.state' <<< "${is}")
+              state=$(jq -r '.state' <<< "${is}")  # opened/closed
               labels=$(jq -c '.labels' <<< "${is}")
               ml_title=$(jq -r '.milestone.title // empty' <<< "${is}")
               author=$(jq -r '.author.username' <<< "${is}")
-              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -d "$(jq -n --arg title "${title}" --arg body "**Imported from GitLab by @${author}**\n\n${body}" --argjson labels "${labels}" '{title:$title, body:$body, labels:$labels}')" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues")
+              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+                -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                -d "$(jq -n --arg title "${title}" --arg body "**Imported from GitLab by @${author}**\n\n${body}" --argjson labels "${labels}" '{title:$title, body:$body, labels:$labels}')" \
+                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues")
               http=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
               gh_issue_number=$(echo "${CREATE}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
               echo "Issue create status=${http} number=${gh_issue_number}"
@@ -522,13 +540,19 @@ jobs:
               if [[ -n "${ml_title}" && -n "${gh_issue_number}" ]]; then
                 mid=$(curl -s -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones" | jq -r --arg t "${ml_title}" '.[] | select(.title==$t) | .number' | head -n1)
                 if [[ -n "${mid}" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -d "$(jq -n --argjson m "${mid}" '{milestone:$m}')" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${gh_issue_number}"
+                  curl -s -o /dev/null -w "%{http_code}" -X PATCH \
+                    -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                    -d "$(jq -n --argjson m "${mid}" '{milestone:$m}')" \
+                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${gh_issue_number}"
                   sleep 1
                 fi
               fi
 
               if [[ "${state}" == "closed" && -n "${gh_issue_number}" ]]; then
-                curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -d '{"state":"closed"}' "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${gh_issue_number}"
+                curl -s -o /dev/null -w "%{http_code}" -X PATCH \
+                  -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                  -d '{"state":"closed"}' \
+                  "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${gh_issue_number}"
                 sleep 1
               fi
 
@@ -540,7 +564,10 @@ jobs:
                 jq -c '.[]' "${CRESP}" | while read -r note; do
                   nbody=$(jq -r '.body' <<< "${note}")
                   nauth=$(jq -r '.author.username' <<< "${note}")
-                  curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -d "$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${gh_issue_number}/comments"
+                  curl -s -o /dev/null -w "%{http_code}" \
+                    -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                    -d "$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')" \
+                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${gh_issue_number}/comments"
                   sleep 1
                 done
                 nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${CHDR}" | tr -d '\r')
@@ -548,7 +575,6 @@ jobs:
                 cpage="${nnext}"
               done
             done
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" |            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
-          done
