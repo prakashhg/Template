@@ -1,0 +1,122 @@
+
+name: Repo Migration · Orchestrator (GitLab → GitHub)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gl_url:
+        description: "GitLab base URL (e.g., https://gitlab.com)"
+        required: false
+        type: string
+      gl_project:
+        description: "GitLab project path (e.g., group/subgroup/repo)"
+        required: true
+        type: string
+      gh_owner:
+        description: "GitHub owner/org (e.g., prakashhg)"
+        required: true
+        type: string
+      gh_repo:
+        description: "GitHub repository name (e.g., my_project)"
+        required: true
+        type: string
+      auto_create_repo:
+        description: "Create destination repo if missing?"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      delete_dest_repo_first:
+        description: "Delete destination repo before mirroring?"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      migrate_issues:
+        description: "Migrate Issues + Comments"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      migrate_mrs:
+        description: "Migrate Merge Requests → Pull Requests"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  stage_commit:
+    name: "1) Repo Migration · 1.1 Commit Sync"
+    uses: ./.github/workflows/1-01_commit_sync.yml
+    with:
+      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
+      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
+      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
+      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+      auto_create_repo: ${{ inputs.auto_create_repo || vars.AUTO_CREATE_REPO || 'true' }}
+      delete_dest_repo_first: ${{ inputs.delete_dest_repo_first || vars.DELETE_DEST_REPO_FIRST || 'false' }}
+    secrets: inherit
+
+  stage_tag:
+    name: "1) Repo Migration · 1.2 Tag Sync"
+    needs: stage_commit
+    uses: ./.github/workflows/1-02_tag_sync.yml
+    with:
+      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
+      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
+      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
+      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+    secrets: inherit
+
+  stage_pr:
+    name: "1) Repo Migration · 1.3 PR Sync (MR → PR)"
+    needs: stage_tag
+    if: ${{ inputs.migrate_mrs == 'true' || vars.MIGRATE_MRS == 'true' }}
+    uses: ./.github/workflows/1-03_pr_sync.yml
+    with:
+      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
+      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
+      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
+      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+    secrets: inherit
+
+  stage_label:
+    name: "1) Repo Migration · 1.4 Label Sync"
+    needs: stage_pr
+    uses: ./.github/workflows/1-04_label_sync.yml
+    with:
+      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
+      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
+      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
+      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+    secrets: inherit
+
+  stage_milestone:
+    name: "1) Repo Migration · 1.5 Milestone Sync"
+    needs: stage_label
+    uses: ./.github/workflows/1-05_milestone_sync.yml
+    with:
+      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
+      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
+      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
+      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+    secrets: inherit
+
+  stage_issue:
+    name: "1) Repo Migration · 1.6 Issue Sync"
+    needs: stage_milestone
+    if: ${{ inputs.migrate_issues == 'true' || vars.MIGRATE_ISSUES == 'true' }}
+    uses: ./.github/workflows/1-06_issue_sync.yml
+    with:
+      gl_url: ${{ inputs.gl_url || vars.GL_URL || 'https://gitlab.com' }}
+      gl_project: ${{ inputs.gl_project || vars.GL_PROJECT }}
+      gh_owner: ${{ inputs.gh_owner || vars.GH_OWNER }}
+      gh_repo: ${{ inputs.gh_repo || vars.GH_REPO }}
+    secrets: inherit
+``
