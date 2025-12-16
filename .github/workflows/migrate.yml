@@ -40,7 +40,7 @@ jobs:
           : "${GL_TOKEN:?GITLAB_TOKEN missing (secrets)}"
 
           GL_API="${GL_URL%/}/api/v4"
-          ENC_GROUP=$(jq -rn --arg x "$GL_GROUP" '$x|@uri')   # URL-encode group path
+          ENC_GROUP=$(jq -rn --arg x "$GL_GROUP" '$x|@uri')
           SUBS="${INCLUDE_SUBGROUPS:-true}"
           ARCH="${INCLUDE_ARCHIVED:-false}"
 
@@ -216,8 +216,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -284,8 +284,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -421,8 +421,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -497,7 +497,7 @@ jobs:
             page="$next"
           done
 
-  # 1.5) Milestone sync
+  # 1.5) Milestone sync  (here-doc to prevent HTML escaping)
   repo_migration_milestone_sync:
     name: "1.5) ${{ matrix.project }} · Milestone sync"
     needs: [discover_projects, repo_migration_label_sync]
@@ -505,8 +505,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -551,9 +551,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # Write logic via SINGLE-QUOTED here-doc to prevent any HTML escaping
+          cat > milestones.sh <<'BASH'
+          set -euo pipefail
+
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
+
+            # RAW '&' in query string (NO HTML entities)
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/projects/$GL_ENC/milestones?per_page=100&page=$page" > "$RESP"
 
@@ -561,8 +568,10 @@ jobs:
               title=$(jq -r '.title' <<< "$ms")
               description=$(jq -r '.description // empty' <<< "$ms")
               due=$(jq -r '.due_date // empty' <<< "$ms")
+
               payload=$(jq -n --arg title "$title" --arg desc "$description" --arg due "$due" \
                 '{title:$title, description:$desc} + ((($due|length)>0) ? {due_on:$due} : {})')
+
               status=$(curl -s -o /dev/null -w "%{http_code}" \
                 -H "Authorization: Bearer $GH_PAT" \
                 -H "Accept: application/vnd.github+json" \
@@ -573,5 +582,17 @@ jobs:
             done
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-            [[ -z "$next" || "$next" == "0" ]] && break            [[ -z "$next" || "$next" == "0" ]] && break
+            [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
+          done
+          BASH
+
+          # Guard: fail fast if any HTML entities got injected by editor
+                   if grep -Eq '&amp;|&lt;|&gt;' milestones.sh; then
+            echo "ERROR: Detected HTML-escaped characters in milestones.sh (e.g., &amp;, &lt;, &gt;)."
+            echo "Please ensure the workflow is saved as plain text without HTML escaping."
+            echo "---- offending lines ----"
+            grep -nE '&amp;|&lt;|&gt;' milestones.sh || true
+            exit 1
+          fi
+
