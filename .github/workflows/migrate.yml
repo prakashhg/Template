@@ -9,21 +9,6 @@ permissions:
   issues: write
   pull-requests: write
 
-# Single source of truth: use repository/environment Variables & Secrets only.
-env:
-  # Variables (must be set in Repo/Environment Variables)
-  GL_URL: ${{ vars.GL_URL }}
-  GL_PROJECT: ${{ vars.GL_PROJECT }}
-  GH_OWNER: ${{ vars.GH_OWNER }}
-  GH_REPO: ${{ vars.GH_REPO }}
-  AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}           # 'true' or 'false'
-  DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}    # 'true' or 'false'
-  MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}                # 'true' or 'false'
-
-  # Secrets
-  GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-  GH_PAT: ${{ secrets.GH_PAT }}
-
   # Working dir
   WORKDIR: /tmp/mirror-work
 
