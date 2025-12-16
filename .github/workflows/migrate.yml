@@ -575,3 +575,4 @@ jobs:
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[            [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
+            BASH
