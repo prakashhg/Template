@@ -102,15 +102,15 @@ env:
   GH_PAT:   ${{ secrets.GH_PAT }}
 
   # Variable fallbacks (org/repo Variables)
-  VAR_GL_URL:                  ${{ vars.GL_URL }}
-  VAR_GH_OWNER:                ${{ vars.GH_OWNER }}
-  VAR_AUTO_CREATE:             ${{ vars.AUTO_CREATE_REPO }}
-  VAR_DELETE_FIRST:            ${{ vars.DELETE_DEST_REPO_FIRST }}
-  VAR_MIGRATE_MRS:             ${{ vars.MIGRATE_MRS }}
+  VAR_GL_URL:       ${{ vars.GL_URL }}
+  VAR_GH_OWNER:     ${{ vars.GH_OWNER }}
+  VAR_AUTO_CREATE:  ${{ vars.AUTO_CREATE_REPO }}
+  VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
+  VAR_MIGRATE_MRS:  ${{ vars.MIGRATE_MRS }}
 
 jobs:
   # -----------------------------
-  # 0) Resolve mode & discover repos (group mode) OR build single target
+  # 0) Discover repositories / Build plan
   # -----------------------------
   discover:
     name: "0) Discover repositories / Build plan"
@@ -188,7 +188,7 @@ jobs:
           projects="[]"
 
           if [[ -n "${IN_GL_PROJECT}" ]]; then
-            # ----- Single repo mode (compatible with your original workflow) -----
+            # ----- Single repo mode -----
             gh_repo="${IN_GH_REPO}"
             if [[ -z "$gh_repo" ]]; then
               # Default: use the last path segment of gl_project
@@ -203,7 +203,7 @@ jobs:
 
             enc_group=$(jq -rn --arg x "$IN_GL_GROUP" '$x|@uri')
 
-            # Resolve group to numeric ID (GitLab accepts path or ID in the same endpoint)
+            # Resolve group to numeric ID
             grp_json=$(curl -s -H "PRIVATE-TOKEN: $GL_TOKEN" "$GL_API/groups/$enc_group")
             gid=$(jq -r '.id // empty' <<<"$grp_json")
             if [[ -z "$gid" || "$gid" == "null" ]]; then
@@ -240,14 +240,13 @@ jobs:
                     gh_name="${pwn//\//-}"
                     ;;
                   "{path_with_namespace}")
-                    # Not valid on GitHub if contains '/', so force dash replacement
                     gh_name="${pwn//\//-}"
                     ;;
                   "{path}")
                     gh_name="$path"
                     ;;
                   *)
-                    # Simple macro replacement: supports {path_with_namespace} and {path}
+                    # Simple macro replacement
                     gh_name="${name_tmpl//\{path_with_namespace\}/$pwn}"
                     gh_name="${gh_name//\{path\}/$path}"
                     gh_name="${gh_name//\|slash_to_dash/}"
@@ -304,16 +303,16 @@ jobs:
         repo: ${{ fromJSON(needs.discover.outputs.projects_json) }}
     env:
       # Inherit resolved config
-      GL_URL:      ${{ needs.discover.outputs.gl_url }}
-      GH_OWNER:    ${{ needs.discover.outputs.gh_owner }}
-      AUTO_CREATE: ${{ needs.discover.outputs.auto_create }}
-      DELETE_FIRST:${{ needs.discover.outputs.delete_first }}
-      MIGRATE_MRS: ${{ needs.discover.outputs.migrate_mrs }}
+      GL_URL:       ${{ needs.discover.outputs.gl_url }}
+      GH_OWNER:     ${{ needs.discover.outputs.gh_owner }}
+      AUTO_CREATE:  ${{ needs.discover.outputs.auto_create }}
+      DELETE_FIRST: ${{ needs.discover.outputs.delete_first }}
+      MIGRATE_MRS:  ${{ needs.discover.outputs.migrate_mrs }}
 
       # Per-repo
-      GL_PROJECT:  ${{ matrix.repo.gl_project }}
-      GH_REPO:     ${{ matrix.repo.gh_repo }}
-      WORKDIR:     /tmp/mirror-work/${{ matrix.repo.gh_repo }}
+      GL_PROJECT:   ${{ matrix.repo.gl_project }}
+      GH_REPO:      ${{ matrix.repo.gh_repo }}
+      WORKDIR:      /tmp/mirror-work/${{ matrix.repo.gh_repo }}
     steps:
       - name: Install git/jq/curl
         run: |
@@ -563,6 +562,4 @@ jobs:
             done
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
-          done
-``
+                       page="$next"
