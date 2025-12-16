@@ -12,7 +12,7 @@ permissions:
   pull-requests: write
 
 jobs:
-  # 0) Discover all projects in the GitLab group (optionally include subgroups)
+  # 0) Discover all projects in the GitLab group (optionally include subgroups/archived)
   discover_projects:
     name: "0) Discover projects in GL group"
     runs-on: ubuntu-latest
@@ -60,10 +60,8 @@ jobs:
           TMP=$(mktemp)
           > "$TMP"
 
-          # Fetch all projects in the group (honor pagination)
           # Endpoint: GET /groups/:id/projects?include_subgroups=true&per_page=100&page=N
-          # (:id can be URL-encoded full path)  ➜ docs & examples in citations
-          # We keep only .path_with_namespace for the matrix.
+          # :id accepts URL-encoded group path (ENC_GROUP)
           while true; do
             HDR=$(mktemp)
             RESP=$(mktemp)
@@ -77,19 +75,21 @@ jobs:
             page="$NEXT"
           done
 
-          # Build a JSON array of strings for the matrix
-          MATRIX_JSON=$(jq -Rn '[inputs]' < "$TMP")
+          # 🔧 FIX: use compact JSON (-c) so we can set the output on a single line
+          MATRIX_JSON=$(jq -cRn '[inputs]' < "$TMP")
+
           echo "Found $(jq 'length' <<<"$MATRIX_JSON") projects"
+          # Write a single name=value line to $GITHUB_OUTPUT (required format)
           echo "project_list=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
-  # 1) Repo Migration · 1.1 Commit/branch mirror  (matrix over all projects)
+  # 1) Repo Migration · 1.1 Commit/branch mirror  (matrix over discovered projects)
   repo_migration_commit_sync:
     name: "1) ${ { matrix.project } } · Commit/Branch mirror"
     needs: discover_projects
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 6  # optionally tune with a vars.MAX_PARALLEL if you want
+      max-parallel: 6
       matrix:
         project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
@@ -121,14 +121,13 @@ jobs:
           : "${GL_TOKEN:?GITLAB_TOKEN missing}"
           : "${GH_PAT:?GH_PAT missing}"
 
-          # Defaults
           AUTO_CREATE="${AUTO_CREATE:-true}"
           DELETE_FIRST="${DELETE_FIRST:-false}"
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
 
-          # Compute GH_REPO from GL_PROJECT
+          # Compute destination repo name
           if [[ "$REPO_NAME_MODE" == "fullpath" ]]; then
             base="$(echo "$GL_PROJECT" | tr '/' "$GH_REPO_SEPARATOR")"
           else
@@ -278,7 +277,7 @@ jobs:
           echo "Pushing tags..."
           git push --tags github
 
-  # 1.3) PR sync (MR → PR) — optional
+  # 1.3) PR sync (MR → PR) — optional via vars.MIGRATE_MRS
   repo_migration_pr_sync:
     name: "1.3) ${ { matrix.project } } · MR → PR"
     needs: [discover_projects, repo_migration_commit_sync]
@@ -567,4 +566,4 @@ jobs:
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
+                       page="$next"
