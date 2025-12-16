@@ -86,14 +86,3 @@ jobs:
       gl_project: ${{ needs.commit_sync.outputs.gl_project }}
       gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
       gh_repo: ${{ needs.commit_sync.outputs.gh_repo }}
-
-  pr_sync:
-    needs: commit_sync
-    if: ${{ needs.commit_sync.outputs.migrate_mrs == 'true' }}
-    uses: ./.github/workflows/pr_sync.yml
-    secrets: inherit
-    with:
-      gl_url: ${{ needs.commit_sync.outputs.gl_url }}
-      gl_project: ${{ needs.commit_sync.outputs.gl_project }}
-      gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
-      gh_repo: ${{ needs.commit_sync.outputs.gh_repo }}
