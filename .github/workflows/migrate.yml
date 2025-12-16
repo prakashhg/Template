@@ -1,17 +1,100 @@
 
-name: migrate
+name: "GitLab → GitHub Migration (Orchestrator)"
+
 on:
   workflow_dispatch:
+    inputs:
+      gl_url:
+        description: "GitLab base URL (e.g., https://gitlab.com)"
+        required: false
+        type: string
+      gl_project:
+        description: "GitLab project path (e.g., group/subgroup/repo)"
+        required: true
+        type: string
+      gh_owner:
+        description: "GitHub user/org owner (e.g., prakashhg)"
+        required: true
+        type: string
+      gh_repo:
+        description: "GitHub repository name (e.g., my_project)"
+        required: true
+        type: string
+      auto_create_repo:
+        description: "Create destination repo if missing? (true/false)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      delete_dest_repo_first:
+        description: "Delete destination repo before mirroring? (true/false)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+      migrate_mrs:
+        description: "Migrate Merge Requests → Pull Requests (true/false)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
 jobs:
   commit_sync:
+    # Reusable workflow
     uses: ./.github/workflows/commit_sync.yml
+    secrets: inherit
+    with:
+      gl_url: ${{ inputs.gl_url }}
+      gl_project: ${{ inputs.gl_project }}
+      gh_owner: ${{ inputs.gh_owner }}
+      gh_repo: ${{ inputs.gh_repo }}
+      auto_create_repo: ${{ inputs.auto_create_repo }}
+      delete_dest_repo_first: ${{ inputs.delete_dest_repo_first }}
+      migrate_mrs: ${{ inputs.migrate_mrs }}
+
   tag_sync:
+    needs: commit_sync
     uses: ./.github/workflows/tag_sync.yml
-  pr_sync:
-    uses: ./.github/workflows/pr_sync.yml
+    secrets: inherit
+    with:
+      gl_url: ${{ needs.commit_sync.outputs.gl_url }}
+      gl_project: ${{ needs.commit_sync.outputs.gl_project }}
+      gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
+      gh_repo:  ${{ needs.commit_sync.outputs.gh_repo }}
+
   label_sync:
+    needs: commit_sync
     uses: ./.github/workflows/label_sync.yml
+    secrets: inherit
+    with:
+      gl_url: ${{ needs.commit_sync.outputs.gl_url }}
+      gl_project: ${{ needs.commit_sync.outputs.gl_project }}
+      gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
+      gh_repo:  ${{ needs.commit_sync.outputs.gh_repo }}
+
   milestone_sync:
+    needs: [commit_sync, label_sync]
     uses: ./.github/workflows/milestone_sync.yml
-  issue_sync:
-    uses: ./.github/workflows/issue_sync.yml
+    secrets: inherit
+    with:
+      gl_url: ${{ needs.commit_sync.outputs.gl_url }}
+      gl_project: ${{ needs.commit_sync.outputs.gl_project }}
+      gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
+      gh_repo:  ${{ needs.commit_sync.outputs.gh_repo }}
+
+  pr_sync:
+    needs: commit_sync
+    if: ${{ needs.commit_sync.outputs.migrate_mrs == 'true' }}
+    uses: ./.github/workflows/pr_sync.yml
+    secrets: inherit
+    with:
+      gl_url: ${{ needs.commit_sync.outputs.gl_url }}
+      gl_project: ${{ needs.commit_sync.outputs.gl_project }}
+      gh_owner: ${{ needs.commit_sync.outputs.gh_owner }}
+      gh_repo:  ${{ needs.commit_sync.outputs.gh
