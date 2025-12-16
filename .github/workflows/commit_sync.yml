@@ -1,0 +1,126 @@
+
+name: "1) Repo Migration · 1.1 Commit Sync"
+
+on:
+  workflow_call:
+    inputs:
+      gl_url:        { required: true, type: string }
+      gl_project:    { required: true, type: string }
+      gh_owner:      { required: true, type: string }
+      gh_repo:       { required: true, type: string }
+      auto_create_repo:
+        description: "Create destination repo if missing?"
+        required: false
+        type: string
+        default: "true"
+      delete_dest_repo_first:
+        description: "Delete destination repo before mirroring?"
+        required: false
+        type: string
+        default: "false"
+    secrets:
+      GH_PAT:        { required: true }
+      GITLAB_TOKEN:  { required: true }
+  workflow_dispatch:
+    inputs:
+      gl_url:               { description: "GitLab base URL", required: true, type: string }
+      gl_project:           { description: "GitLab project path", required: true, type: string }
+      gh_owner:             { description: "GitHub owner/org", required: true, type: string }
+      gh_repo:              { description: "GitHub repository name", required: true, type: string }
+      auto_create_repo:     { description: "Auto-create repo?", required: false, default: "true", type: choice, options: ["true","false"] }
+      delete_dest_repo_first:{ description: "Danger: delete destination repo first?", required: false, default: "false", type: choice, options: ["true","false"] }
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  commit_sync:
+    runs-on: ubuntu-latest
+    env:
+      GL_URL:             ${{ inputs.gl_url }}
+      GL_PROJECT:         ${{ inputs.gl_project }}
+      GH_OWNER:           ${{ inputs.gh_owner }}
+      GH_REPO:            ${{ inputs.gh_repo }}
+      AUTO_CREATE:        ${{ inputs.auto_create_repo || 'true' }}
+      DELETE_FIRST:       ${{ inputs.delete_dest_repo_first || 'false' }}
+      GL_TOKEN:           ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:             ${{ secrets.GH_PAT }}
+      WORKDIR:            /tmp/mirror-work
+    steps:
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl git
+
+      - name: Validate inputs & secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -z "${GL_PROJECT:-}" ]] && echo "ERROR: GL_PROJECT required" && exit 1
+          [[ -z "${GH_OWNER:-}" || -z "${GH_REPO:-}" ]] && echo "ERROR: GH_OWNER/GH_REPO required" && exit 1
+          [[ -z "${GL_TOKEN:-}" ]] && echo "ERROR: Missing secret GITLAB_TOKEN" && exit 1
+          [[ -z "${GH_PAT:-}"   ]] && echo "ERROR: Missing secret GH_PAT" && exit 1
+
+      - name: Optionally delete destination repository (DANGER)
+        if: env.DELETE_FIRST == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+            "${REPO_URL}")
+          echo "Delete HTTP status: ${STATUS}"
+          if [[ "${STATUS}" != "204" && "${STATUS}" != "404" ]]; then
+            echo "ERROR: Delete failed (HTTP ${STATUS})."
+            exit 1
+          fi
+
+      - name: Create GitHub repo if missing
+        if: env.AUTO_CREATE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${REPO_API}")
+          if [[ "${STATUS}" == "200" ]]; then
+            echo "Repo already exists."
+          else
+            MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
+            if [[ "${GH_OWNER}" == "${MY_LOGIN}" ]]; then
+              CREATE_URL="https://api.github.com/user/repos"
+            else
+              CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
+            fi
+            PAYLOAD=$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
+            RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Content-Type: application/json" -d "${PAYLOAD}" "${CREATE_URL}")
+            HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
+            [[ "${HTTP}" == "201" ]] || { echo "Failed to create repo (HTTP ${HTTP})."; exit 1; }
+          fi
+          echo "GH repo ready: https://github.com/${GH_OWNER}/${GH_REPO}"
+
+      - name: Clone GitLab mirror (branches & commits)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${WORKDIR}"
+          cd "${WORKDIR}"
+          HOST="${GL_URL#*://}"
+          SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${GL_PROJECT}.git"
+          echo "Cloning --mirror from ${GL_URL}/${GL_PROJECT}"
+          git clone --mirror "${SRC_URL}" src.git
+          git -C src.git show-ref | head -n 10 || true
+
+      - name: Push mirror to GitHub (branches & commits)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${WORKDIR}/src.git"
+          PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
+          git remote remove github 2>/dev/null || true
+                   git remote add github "${PUSH_URL}"
+          echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
