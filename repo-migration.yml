@@ -1,0 +1,378 @@
+
+name: Stage 1 — Repo Migration (GitLab → GitHub)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gl_url:
+        description: "GitLab base URL (e.g., https://gitlab.com)"
+        required: false
+        type: string
+      gl_project:
+        description: "GitLab project path (group/subgroup/repo)"
+        required: true
+        type: string
+      gh_owner:
+        description: "GitHub owner/org"
+        required: true
+        type: string
+      gh_repo:
+        description: "GitHub repository name"
+        required: true
+        type: string
+      auto_create_repo:
+        description: "Auto-create destination repo if missing?"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      delete_dest_repo_first:
+        description: "Delete destination repo first (DANGER)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  # Secrets (set in Settings → Secrets and variables → Actions → Secrets)
+  GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}  # scopes: read_api, read_repository
+  GH_PAT:   ${{ secrets.GH_PAT }}        # scopes: repo (and admin:org for org creation)
+
+  # Optional Variables (Settings → Secrets and variables → Actions → Variables)
+  VAR_GL_URL:       ${{ vars.GL_URL }}
+  VAR_AUTO_CREATE:  ${{ vars.AUTO_CREATE_REPO }}
+  VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
+
+jobs:
+  # -------------------- Job: mirror code --------------------
+  mirror_code:
+    runs-on: ubuntu-latest
+    outputs:
+      gl_url:        ${{ steps.out.outputs.gl_url }}
+      gl_project:    ${{ steps.out.outputs.gl_project }}
+      gh_owner:      ${{ steps.out.outputs.gh_owner }}
+      gh_repo:       ${{ steps.out.outputs.gh_repo }}
+      auto_create:   ${{ steps.out.outputs.auto_create }}
+      delete_first:  ${{ steps.out.outputs.delete_first }}
+      workdir:       ${{ steps.out.outputs.workdir }}
+    steps:
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl git
+
+      - name: Resolve configuration
+        id: cfg
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Precedence handled in shell: inputs > variables > defaults
+          GL_URL="${{ inputs.gl_url }}"
+          [ -z "${GL_URL}" ] && GL_URL="${{ env.VAR_GL_URL || 'https://gitlab.com' }}"
+
+          GL_PROJECT="${{ inputs.gl_project }}"
+          GH_OWNER="${{ inputs.gh_owner }}"
+          GH_REPO="${{ inputs.gh_repo }}"
+          AUTO_CREATE="${{ inputs.auto_create_repo }}"
+          [ -z "${AUTO_CREATE}" ] && AUTO_CREATE="${{ env.VAR_AUTO_CREATE || 'true' }}"
+
+          DELETE_FIRST="${{ inputs.delete_dest_repo_first }}"
+          [ -z "${DELETE_FIRST}" ] && DELETE_FIRST="${{ env.VAR_DELETE_FIRST || 'false' }}"
+
+          [[ -z "${GL_PROJECT}" ]] && { echo "ERROR: GL_PROJECT required"; exit 1; }
+          [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]] && { echo "ERROR: GH_OWNER/GH_REPO required"; exit 1; }
+          [[ -z "${GL_TOKEN:-}" ]] && { echo "ERROR: Missing GITLAB_TOKEN"; exit 1; }
+          [[ -z "${GH_PAT:-}"   ]] && { echo "ERROR: Missing GH_PAT"; exit 1; }
+
+          echo "GL_URL=${GL_URL}"       >> "$GITHUB_ENV"
+          echo "GL_PROJECT=${GL_PROJECT}" >> "$GITHUB_ENV"
+          echo "GH_OWNER=${GH_OWNER}"   >> "$GITHUB_ENV"
+          echo "GH_REPO=${GH_REPO}"     >> "$GITHUB_ENV"
+          echo "AUTO_CREATE=${AUTO_CREATE}" >> "$GITHUB_ENV"
+          echo "DELETE_FIRST=${DELETE_FIRST}" >> "$GITHUB_ENV"
+          echo "WORKDIR=/tmp/mirror-work" >> "$GITHUB_ENV"
+
+      - name: Export outputs (for downstream jobs)
+        id: out
+        shell: bash
+        run: |
+          echo "gl_url=${GL_URL}"         >> "$GITHUB_OUTPUT"
+          echo "gl_project=${GL_PROJECT}" >> "$GITHUB_OUTPUT"
+          echo "gh_owner=${GH_OWNER}"     >> "$GITHUB_OUTPUT"
+          echo "gh_repo=${GH_REPO}"       >> "$GITHUB_OUTPUT"
+          echo "auto_create=${AUTO_CREATE}" >> "$GITHUB_OUTPUT"
+          echo "delete_first=${DELETE_FIRST}" >> "$GITHUB_OUTPUT"
+          echo "workdir=/tmp/mirror-work" >> "$GITHUB_OUTPUT"
+
+      - name: Optionally delete destination repo (DANGER)
+        if: env.DELETE_FIRST == 'false'
+        shell: bash
+        run: echo "Skipping delete: DELETE_FIRST=false"
+
+      - name: Optionally delete destination repo (DANGER)
+        if: env.DELETE_FIRST == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X DELETE \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}")
+          [[ "${STATUS}" == "204" || "${STATUS}" == "404" ]] || { echo "Delete failed (HTTP ${STATUS})"; exit 1; }
+
+      - name: Create GitHub repo if missing
+        if: env.AUTO_CREATE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${REPO_API}")
+          if [[ "${STATUS}" != "200" ]]; then
+            MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
+            CREATE_URL=$([[ "${GH_OWNER}" == "${MY_LOGIN}" ]] && echo "https://api.github.com/user/repos" || echo "https://api.github.com/orgs/${GH_OWNER}/repos")
+            CREATE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer ${GH_PAT}" -H "Content-Type: application/json" \
+              -d "{\"name\":\"${GH_REPO}\",\"private\":true,\"has_issues\":true,\"has_projects\":true,\"has_wiki\":true}" \
+              "${CREATE_URL}")
+            [[ "${CREATE_STATUS}" == "201" ]] || { echo "Failed to create repo (HTTP ${CREATE_STATUS})"; exit 1; }
+          fi
+
+      - name: Clone GitLab mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${WORKDIR}"
+          cd "${WORKDIR}"
+          HOST="${GL_URL#*://}"
+          SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${GL_PROJECT}.git"
+          git clone --mirror "${SRC_URL}" src.git
+          git -C src.git show-ref | head -n 20 || true
+
+      - name: Push mirror to GitHub
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${WORKDIR}/src.git"
+          PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
+          git remote remove github 2>/dev/null || true
+          git remote add github "${PUSH_URL}"
+          echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
+          git push --mirror github
+
+  # -------------------- Job: validate commits & tags --------------------
+  validate_commits:
+    needs: mirror_code
+    runs-on: ubuntu-latest
+    outputs:
+      parity_report_path: ${{ steps.out.outputs.parity_report_path }}
+    steps:
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y git jq
+
+      - name: Check parity of refs (heads/tags)
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKDIR="${{ needs.mirror_code.outputs.workdir }}"
+          GH_OWNER="${{ needs.mirror_code.outputs.gh_owner }}"
+          GH_REPO="${{ needs.mirror_code.outputs.gh_repo }}"
+
+          cd "${WORKDIR}/src.git"
+          git ls-remote . 'refs/heads/*' > /tmp/src_heads.txt
+          git ls-remote . 'refs/tags/*'  > /tmp/src_tags.txt
+
+          git ls-remote "https://github.com/${GH_OWNER}/${GH_REPO}.git" 'refs/heads/*' > /tmp/dst_heads.txt
+          git ls-remote "https://github.com/${GH_OWNER}/${GH_REPO}.git" 'refs/tags/*'  > /tmp/dst_tags.txt
+
+          jq -n \
+            --arg heads_src "$(wc -l < /tmp/src_heads.txt)" \
+            --arg heads_dst "$(wc -l < /tmp/dst_heads.txt)" \
+            --arg tags_src  "$(wc -l < /tmp/src_tags.txt)" \
+            --arg tags_dst  "$(wc -l < /tmp/dst_tags.txt)" \
+            '{heads:{src:$heads_src,dst:$heads_dst},tags:{src:$tags_src,dst:$tags_dst}}' \
+            > /tmp/parity.json
+
+      - name: Export report path
+        id: out
+        shell: bash
+        run: |
+          echo "parity_report_path=/tmp/parity.json" >> "$GITHUB_OUTPUT"
+
+      - name: Upload parity report
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-report
+          path: /tmp/parity.json
+
+  # -------------------- Job: branch sync (default + protections optional) --------------------
+  sync_branches:
+    needs: [mirror_code, validate_commits]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set default branch (optional)
+        if: ${{ vars.DEFAULT_BRANCH != '' }}
+        shell: bash
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_OWNER: ${{ needs.mirror_code.outputs.gh_owner }}
+          GH_REPO:  ${{ needs.mirror_code.outputs.gh_repo }}
+          DEFAULT_BRANCH: ${{ vars.DEFAULT_BRANCH }}
+        run: |
+          set -euo pipefail
+          curl -s -o /dev/null -w "%{http_code}" \
+            -X PATCH \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            -d "{\"default_branch\":\"${DEFAULT_BRANCH}\"}" \
+            "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+
+      - name: Apply branch protections (optional)
+        if: ${{ vars.PROTECT_BRANCHES_JSON != '' }}
+        shell: bash
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_OWNER: ${{ needs.mirror_code.outputs.gh_owner }}
+          GH_REPO:  ${{ needs.mirror_code.outputs.gh_repo }}
+          PROTECT_BRANCHES_JSON: ${{ vars.PROTECT_BRANCHES_JSON }}
+        run: |
+          set -euo pipefail
+          echo "${PROTECT_BRANCHES_JSON}" | jq -c '.[]' | while read -r rule; do
+            branch=$(jq -r '.branch' <<< "$rule")
+            payload=$(jq -c 'del(.branch)' <<< "$rule")
+            curl -s -o /dev/null -w "%{http_code}" \
+              -X PUT \
+              -H "Authorization: Bearer ${GH_PAT}" \
+              -H "Accept: application/vnd.github+json" \
+              -d "${payload}" \
+              "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/branches/${branch}/protection"
+            sleep 1
+          done
+
+  # -------------------- Job: PR migration (MR → PR) --------------------
+  migrate_prs:
+    needs: [mirror_code]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install jq & curl
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+
+      - name: Migrate merge requests → pull requests
+        shell: bash
+        env:
+          GL_URL:     ${{ needs.mirror_code.outputs.gl_url }}
+          GL_PROJECT: ${{ needs.mirror_code.outputs.gl_project }}
+          GH_OWNER:   ${{ needs.mirror_code.outputs.gh_owner }}
+          GH_REPO:    ${{ needs.mirror_code.outputs.gh_repo }}
+          GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+          GH_PAT:     ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
+
+          page=1
+          while :; do
+            RESP=$(mktemp) ; HDR=$(mktemp)
+            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/merge_requests?scope=all&per_page=100&page=${page}" > "${RESP}"
+
+            jq -c '.[]' "${RESP}" | while read -r mr; do
+              title=$(jq -r '.title' <<< "$mr")
+              body=$(jq -r '.description // ""' <<< "$mr")
+              state=$(jq -r '.state' <<< "$mr")    # opened|closed|merged
+              labels=$(jq -c '.labels' <<< "$mr")
+              source_branch=$(jq -r '.source_branch' <<< "$mr")
+              target_branch=$(jq -r '.target_branch' <<< "$mr")
+              author=$(jq -r '.author.username' <<< "$mr")
+              iid=$(jq -r '.iid' <<< "$mr")
+
+              # Verify branches exist on GitHub before creating PR
+              HEAD_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
+                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}")
+              BASE_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
+                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}")
+              if [[ "${HEAD_OK}" != "200" || "${BASE_OK}" != "200" ]]; then
+                echo "Skip MR#${iid}: missing head/base (${source_branch}→${target_branch})"
+                continue
+              fi
+
+              PR=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+                -H "Authorization: Bearer ${GH_PAT}" \
+                -H "Accept: application/vnd.github+json" \
+                -d "$(jq -n \
+                      --arg title "$title" \
+                      --arg body "**Imported from GitLab by @$author**\n\n$body" \
+                      --arg head "$source_branch" \
+                      --arg base "$target_branch" \
+                      '{title:$title, body:$body, head:$head, base:$base}')" \
+                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls")
+              http=$(echo "$PR" | sed -n 's/^HTTP_STATUS://p')
+              pr_num=$(echo "$PR" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
+              echo "PR create status=${http} number=${pr_num}"
+
+              # Add labels (PR is an issue in the Issues API)
+              if [[ -n "${pr_num}" && "${labels}" != "null" ]]; then
+                curl -s -o /dev/null -w "%{http_code}" \
+                  -H "Authorization: Bearer ${GH_PAT}" \
+                  -H "Accept: application/vnd.github+json" \
+                  -d "${labels}" \
+                  "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/labels"
+                sleep 1
+              fi
+
+              # Close / merge based on MR state
+              if [[ -n "${pr_num}" ]]; then
+                if [[ "${state}" == "closed" ]]; then
+                  curl -s -o /dev/null -w "%{http_code}" \
+                    -X PATCH \
+                    -H "Authorization: Bearer ${GH_PAT}" \
+                    -H "Accept: application/vnd.github+json" \
+                    -d '{"state":"closed"}' \
+                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}"
+                elif [[ "${state}" == "merged" ]]; then
+                  curl -s -o /dev/null -w "%{http_code}" \
+                    -X PUT \
+                    -H "Authorization: Bearer ${GH_PAT}" \
+                    -H "Accept: application/vnd.github+json" \
+                    -d '{"merge_method":"merge"}' \
+                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls/${pr_num}/merge"
+                fi
+                sleep 1
+              fi
+            done
+
+            NEXT=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
+            [[ -z "${NEXT}" || "${NEXT}" == "0" ]] && break
+            page="${NEXT}"
+          done
+
+  # -------------------- Job: publish consolidated report --------------------
+  publish_report:
+    needs: [validate_commits]
+    runs-on: ubuntu-latest
+       steps:
+      - name: Download parity artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: parity-report
+          path: reports/
+
+      - name: Create summary
+        shell: bash
+        run: |
+          echo "### Repo Migration Summary" >> $GITHUB_STEP_SUMMARY
