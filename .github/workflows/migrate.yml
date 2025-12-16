@@ -3,15 +3,6 @@ name: GitLab → GitHub Migration (Main)
 
 on:
   workflow_dispatch:
-    inputs:
-      gl_url:         { description: "GitLab base URL", required: true, type: string }
-      gl_project:     { description: "GitLab project path", required: true, type: string }
-      gh_owner:       { description: "GitHub owner/org",    required: true, type: string }
-      gh_repo:        { description: "GitHub repo name",    required: true, type: string }
-      auto_create:    { description: "Create destination?", required: true, type: boolean, default: true }
-      delete_first:   { description: "Delete dest repo first?", required: true, type: boolean, default: false }
-      migrate_mrs:    { description: "Migrate MRs → PRs?", required: true, type: boolean, default: true }
-
 jobs:
   commit-sync:
     uses: ./.github/workflows/commit_sync.yml
