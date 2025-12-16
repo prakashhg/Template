@@ -3,6 +3,34 @@ name: Mirroring (GitLab → GitHub) + Trackers migration [Production]
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+defaults:
+  run:
+    shell: bash
+
+# Single source of truth: repository/environment Variables & Secrets only.
+env:
+  # Variables (must be set in Repo/Environment Variables)
+  GL_URL: ${{ vars.GL_URL }}
+  GL_PROJECT: ${{ vars.GL_PROJECT }}
+  GH_OWNER: ${{ vars.GH_OWNER }}
+  GH_REPO: ${{ vars.GH_REPO }}
+  AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}           # 'true' or 'false'
+  DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}    # 'true' or 'false'
+  MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}                # 'true' or 'false'
+
+  # Secrets
+  GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+  GH_PAT: ${{ secrets.GH_PAT }}
+
+  # Working dir
+  WORKDIR: /tmp/mirror-work
+
 jobs:
   # 1) Repo Migration · 1.1 Commit Sync
   repo_migration_commit_sync:
@@ -10,7 +38,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install tools
-        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -18,7 +45,6 @@ jobs:
 
       - name: Optionally delete destination repository (DANGER)
         if: env.DELETE_FIRST == 'true'
-        shell: bash
         run: |
           set -euo pipefail
           REPO_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
@@ -32,7 +58,6 @@ jobs:
 
       - name: Create GitHub repo if missing
         if: env.AUTO_CREATE == 'true'
-        shell: bash
         run: |
           set -euo pipefail
           REPO_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
@@ -58,7 +83,6 @@ jobs:
           echo "GH repo ready: https://github.com/${GH_OWNER}/${GH_REPO}"
 
       - name: Clone GitLab mirror (branches & commits)
-        shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${WORKDIR}"
@@ -70,7 +94,6 @@ jobs:
           git -C src.git show-ref | head -n 10 || true
 
       - name: Push mirror to GitHub (branches & commits)
-        shell: bash
         run: |
           set -euo pipefail
           cd "${WORKDIR}/src.git"
@@ -92,7 +115,6 @@ jobs:
           sudo apt-get install -y git
 
       - name: Fetch tags from GitLab and push to GitHub
-        shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${WORKDIR}"
@@ -123,7 +145,6 @@ jobs:
           sudo apt-get install -y jq curl
 
       - name: Prepare GitLab API (safe encoding)
-        shell: bash
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
@@ -132,7 +153,6 @@ jobs:
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
       - name: Migrate merge requests → pull requests
-        shell: bash
         run: |
           set -euo pipefail
           : "${GL_API:?GL_API empty}"
@@ -143,7 +163,7 @@ jobs:
             RESP=$(mktemp) ; HDR=$(mktemp)
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/projects/$GL_ENC/merge_requests?scope=all&per_page=100&page=$page" > "$RESP"
-            jq -c '.[]' "$RESP" | while read -r mr; do
+            while read -r mr; do
               title=$(jq -r '.title' <<< "$mr")
               body=$(jq -r '.description // ""' <<< "$mr")
               state=$(jq -r '.state' <<< "$mr")
@@ -197,7 +217,7 @@ jobs:
                 CRESP=$(mktemp) ; CHDR=$(mktemp)
                 curl -s -D "$CHDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
                   "$GL_API/projects/$GL_ENC/merge_requests/$gl_iid/notes?activity_filter=only_comments&per_page=100&page=$cpage" > "$CRESP"
-                jq -c '.[]' "$CRESP" | while read -r note; do
+                while read -r note; do
                   nbody=$(jq -r '.body' <<< "$note")
                   nauth=$(jq -r '.author.username' <<< "$note")
                   curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $GH_PAT" \
@@ -205,12 +225,12 @@ jobs:
                     -d "$(jq -n --arg b "**@$nauth (from GitLab)**\n\n$nbody" '{body:$b}')" \
                     "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$pr_num/comments"
                   sleep 1
-                done
+                done < <(jq -c '.[]' "$CRESP")
                 nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$CHDR" | tr -d '\r')
                 [[ -z "$nnext" || "$nnext" == "0" ]] && break
                 cpage="$nnext"
               done
-            done
+            done < <(jq -c '.[]' "$RESP")
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
@@ -228,7 +248,6 @@ jobs:
           sudo apt-get install -y jq curl
 
       - name: Prepare GitLab API (safe encoding)
-        shell: bash
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
@@ -237,7 +256,6 @@ jobs:
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
       - name: Migrate labels (GitLab → GitHub)
-        shell: bash
         run: |
           set -euo pipefail
           page=1
@@ -245,7 +263,7 @@ jobs:
             RESP=$(mktemp) ; HDR=$(mktemp)
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/projects/$GL_ENC/labels?per_page=100&page=$page" > "$RESP"
-            jq -c '.[]' "$RESP" | while read -r lbl; do
+            while read -r lbl; do
               name=$(jq -r '.name' <<< "$lbl")
               color=$(jq -r '.color' <<< "$lbl" | sed 's/^#//')
               description=$(jq -r '.description // empty' <<< "$lbl")
@@ -264,7 +282,7 @@ jobs:
                   "https://api.github.com/repos/$GH_OWNER/$GH_REPO/labels/$name"
               fi
               sleep 1
-            done
+            done < <(jq -c '.[]' "$RESP")
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
@@ -282,7 +300,6 @@ jobs:
           sudo apt-get install -y jq curl
 
       - name: Prepare GitLab API (safe encoding)
-        shell: bash
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
@@ -291,7 +308,6 @@ jobs:
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
       - name: Migrate milestones (GitLab → GitHub)
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -303,7 +319,7 @@ jobs:
             RESP=$(mktemp) ; HDR=$(mktemp)
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/projects/$GL_ENC/milestones?per_page=100&page=$page" > "$RESP"
-            jq -c '.[]' "$RESP" | while read -r ms; do
+            while read -r ms; do
               title=$(jq -r '.title' <<< "$ms")
               description=$(jq -r '.description // empty' <<< "$ms")
               due=$(jq -r '.due_date // empty' <<< "$ms")
@@ -316,9 +332,9 @@ jobs:
                        "https://api.github.com/repos/$GH_OWNER/$GH_REPO/milestones")
               echo "Milestone $title status: $status"
               sleep 1
-            done
+            done < <(jq -c '.[]' "$RESP")
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-            [[ -z "$next" || "$next" == "0" ]] &&            [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
+            [[ -z "$next" || "$next" == "0" ]] && break
+                       page="$next"
           done
           BASH
