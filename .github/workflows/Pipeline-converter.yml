@@ -101,8 +101,8 @@ jobs:
           set -euo pipefail
           # Provide .env.local for Importer (reads env vars when executing)
           cat > .env.local <<EOF
-GITHUB_ACCESS_TOKEN=${GITHUB_ACCESS_TOKEN}
-GITLAB_ACCESS_TOKEN=${GITLAB_ACCESS_TOKEN}
+GITHUB_ACCESS_TOKEN= ${GH_TOKEN}
+GITLAB_ACCESS_TOKEN= ${GITLAB_TOKEN}
 GITLAB_SERVER_URL=${GITLAB_SERVER_URL}
 EOF
 
