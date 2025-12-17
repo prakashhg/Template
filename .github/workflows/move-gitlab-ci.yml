@@ -1,101 +1,17 @@
 
-name: Convert GitLab CI to GitHub Actions
+name: Setup GitHub Actions Importer
 
 on:
   workflow_dispatch:
-    inputs:
-      commit_result:
-        description: "Commit converted workflow(s) back to the repo"
-        required: true
-        default: "true"
 
 jobs:
-  convert:
+  setup-importer:
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
-
     env:
-      # gh is preinstalled on hosted runners; it requires GH_TOKEN in Actions
-      GH_TOKEN: ${{ github.token }}
-
+      GH_TOKEN: ${{ secrets.GH_TOKEN }} # Use your PAT stored in secrets
     steps:
-      - name: Show repository context
-        run: |
-          echo "Repo : $GITHUB_REPOSITORY"
-          echo "Ref  : $GITHUB_REF"
-          echo "SHA  : $GITHUB_SHA"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Locate .gitlab-ci file(s)
-        id: locate
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Find common GitLab CI filenames anywhere in the repo
-          mapfile -t FILES < <(find . -type f \( \
-              -name ".gitlab-ci.yml" -o \
-              -name ".gitlab-ci.yaml" -o \
-              -name ".gitlab-ci" \
-            \) -print)
-
-          if [ "${#FILES[@]}" -eq 0 ]; then
-            echo "❌ No .gitlab-ci file found anywhere in the repository."
-            echo "Searched: .gitlab-ci.yml, .gitlab-ci.yaml, .gitlab-ci"
-            exit 1
-          fi
-
-          echo "✅ Found ${#FILES[@]} GitLab CI file(s):"
-          for f in "${FILES[@]}"; do echo " - ${f}"; done
-
-          # Prefer root-level file if present; else first match
-          pick() { [ -f "$1" ] && echo "$1"; }
-          PREFERRED="$(pick ./.gitlab-ci.yml || pick ./.gitlab-ci.yaml || pick ./.gitlab-ci || echo "")"
-          if [ -z "$PREFERRED" ]; then PREFERRED="${FILES[0]}"; fi
-          echo "Using pipeline file: $PREFERRED"
-          echo "pipeline_path=$PREFERRED" >> "$GITHUB_OUTPUT"
-
-      - name: Install GitHub Actions Importer CLI extension
-        shell: bash
-        run: |
-          set -euo pipefail
+      - name: Install GitHub CLI and Actions Importer
+               run: |
           gh --version
           gh auth status || true
           gh extension install github/gh-actions-importer
-          gh actions-importer version
-
-      - name: Convert GitLab CI to GitHub Actions
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .github/workflows
-          gh actions-importer migrate gitlab \
-            --input "${{ steps.locate.outputs.pipeline_path }}" \
-            --output .github/workflows
-          # If your .gitlab-ci.yml uses remote GitLab includes, add:
-          #   --gitlab-server-url "https://<your-gitlab-host>"
-          #   --gitlab-access-token "${{ secrets.GITLAB_TOKEN }}"
-
-      - name: Show generated workflows
-        run: |
-          echo "Generated workflows under .github/workflows:"
-          ls -la .github/workflows || true
-
-      - name: Commit converted workflows
-        if: ${{ inputs.commit_result == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows || true
-          if git diff --cached --quiet; then
-            echo "No changes to commit            echo "No changes to commit."
-          else
-            git commit -m "chore: convert GitLab CI to GitHub Actions via Importer"
-            git push
