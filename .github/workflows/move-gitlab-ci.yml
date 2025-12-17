@@ -1,4 +1,5 @@
-name: Setup GitHub Actions Importer (REST-only, no gh/no Docker)
+
+name: Setup GitHub Actions Importer
 
 on:
   workflow_dispatch:
@@ -123,3 +124,30 @@ jobs:
           cd "${WORKDIR}/repo"
           git checkout "${{ steps.check_repo.outputs.default_branch }}"
           echo "✅ Repo cloned to ${WORKDIR}/repo"
+
+      - name: "Step 4: Detect .gitlab-ci.yml"
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_DIR="${WORKDIR}/repo"
+          if [[ -f "${REPO_DIR}/.gitlab-ci.yml" ]]; then
+            echo "gitlab_ci_path=${REPO_DIR}/.gitlab-ci.yml" >> "$GITHUB_OUTPUT"
+            echo "✅ Found .gitlab-ci.yml"
+          else
+            echo "gitlab_ci_path=" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ No .gitlab-ci.yml found; exiting workflow."
+            exit 0
+          fi
+
+      - name: "Step 5: Convert .gitlab-ci.yml → GitHub Actions (best-effort, Python)"
+        if: ${{ steps.detect.outputs.gitlab_ci_path != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.detect.outputs.gitlab_ci_path }}"
+          OUT="${WORKDIR}/repo/.github/workflows/gitlab-pipeline-converted.yml"
+          mkdir -p "$(dirname "${OUT}")"
+
+          # Best-effort converter (no Docker, no gh). Preserves job names & scripts.
+          python3 - << 'PYCODE'
