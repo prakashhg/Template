@@ -43,3 +43,113 @@ jobs:
           set -euo pipefail
           docker --version
           gh --version 
+      - name: "0.0) Verify tools & authenticate (Docker + gh)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ensure Docker & gh CLI are available on runner
+          docker --version || { echo "❌ Docker not available"; exit 1; }
+          gh --version || { echo "❌ gh CLI not available"; exit 1; }
+          # Authenticate gh CLI using GH_PAT (must have 'workflow' scope)
+          [[ -n "${GH_PAT:-}" ]] || { echo "❌ Missing GH_PAT secret (needs 'workflow' + 'repo' scopes)"; exit 1; }
+          echo "${GH_PAT}" | gh auth login --with-token
+
+      - name: "0.1) Check repo https://github.com/${{ env.VAR_GH_OWNER }}/${{ env.VAR_GH_REPO }}"
+        id: checkrepo
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh repo view "${VAR_GH_OWNER}/${VAR_GH_REPO}" --json name >/dev/null 2>&1; then
+            echo "✅ Repo exists."
+          else
+            echo "❌ Repo not found: ${VAR_GH_OWNER}/${VAR_GH_REPO}"
+            exit 1
+          fi
+
+      - name: "0.2) Clone repo"
+        id: clone
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKDIR="$(mktemp -d)"
+          echo "WORKDIR=${WORKDIR}" >> "$GITHUB_ENV"
+          gh repo clone "${VAR_GH_OWNER}/${VAR_GH_REPO}" "${WORKDIR}/repo"
+          ls -la "${WORKDIR}/repo"
+
+      - name: "0.3) Detect .gitlab-ci.yml"
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_DIR="${WORKDIR}/repo"
+          if [[ -f "${REPO_DIR}/.gitlab-ci.yml" ]]; then
+            echo "GITLAB_CI_PATH=${REPO_DIR}/.gitlab-ci.yml" >> "$GITHUB_ENV"
+            echo "gitlab_ci_path=${REPO_DIR}/.gitlab-ci.yml" >> "$GITHUB_OUTPUT"
+            echo "✅ Found .gitlab-ci.yml"
+          else
+            echo "gitlab_ci_path=" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ No .gitlab-ci.yml present; nothing to convert."
+            exit 0
+          fi
+
+      - name: "0.4) Install & update GitHub Actions Importer"
+        if: ${{ steps.detect.outputs.gitlab_ci_path != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Install gh extension (idempotent) and update importer container image
+          gh extension install github/gh-actions-importer || true
+          gh actions-importer update
+
+      - name: "0.5) Configure importer via env (GitHub/GitLab endpoints)"
+        if: ${{ steps.detect.outputs.gitlab_ci_path != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The importer reads these env vars for authentication/base URLs
+          export GITHUB_ACCESS_TOKEN="${GH_PAT}"
+          export GITHUB_INSTANCE_URL="https://github.com"
+          export GITLAB_ACCESS_TOKEN="${GL_TOKEN}"
+          export GITLAB_INSTANCE_URL="${VAR_GL_URL:-https://gitlab.com}"
+          # When using --source-file-path, namespace/project can be placeholders:
+          export NAMESPACE="local"
+          export PROJECT="local"
+          echo "Importer configured (env)."
+
+      - name: "0.6) Dry-run conversion (preview)"
+        if: ${{ steps.detect.outputs.gitlab_ci_path != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTDIR="$(mktemp -d)"
+          SRC="${GITLAB_CI_PATH}"
+          echo "🔸 Running dry-run to preview conversion..."
+          gh actions-importer dry-run gitlab \
+            --output-dir "${OUTDIR}" \
+            --namespace "${NAMESPACE}" \
+            --project "${PROJECT}" \
+            --source-file-path "${SRC}"
+          echo "✅ Dry-run complete. Converted workflow(s) preview:"
+          find "${OUTDIR}" -type f -name "*.yml" -maxdepth 3 -print || true
+
+      - name: "0.7) Migrate & open PR that adds workflow under .github/workflows/"
+        id: migrate
+        if: ${{ steps.detect.outputs.gitlab_ci_path != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTDIR="$(mktemp -d)"
+          SRC="${GITLAB_CI_PATH}"
+          TARGET_URL="https://github.com/${VAR_GH_OWNER}/${VAR_GH_REPO}"
+
+          echo "🔸 Running migration (opens PR to ${TARGET_URL})..."
+          # This opens a PR that adds the converted workflow to .github/workflows/
+          PR_LINE=$(gh actions-importer migrate gitlab \
+            --target-url "${TARGET_URL}" \
+            --output-dir "${OUTDIR}" \
+            --namespace "${NAMESPACE}" \
+            --project "${PROJECT}" \
+            --source-file-path "${SRC}" | grep -E 'Pull request: ')
+          PR_URL="$(echo "${PR_LINE}" | awk '{print $3}' | tr -d "'")"
+          echo "pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
+          echo "✅ Migration requested. PR: ${PR_URL:-'(not parsed)'}"
