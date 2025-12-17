@@ -8,10 +8,11 @@ jobs:
   setup-importer:
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.GH_TOKEN }} # Use your PAT stored in secrets
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}  # PAT stored in Secrets
     steps:
       - name: Install GitHub CLI and Actions Importer
-               run: |
+        run: |
           gh --version
           gh auth status || true
           gh extension install github/gh-actions-importer
+          gh actions-importer version
