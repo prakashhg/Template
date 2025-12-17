@@ -5,14 +5,40 @@ on:
   workflow_dispatch:
 
 jobs:
-  setup-importer:
+  repo_migration_commit_sync:
+    name: "1) Repo Migration · 1.1 Commit Sync"
     runs-on: ubuntu-latest
+
+    outputs:
+      gl_url: ${{ steps.export.outputs.gl_url }}
+      gl_project: ${{ steps.export.outputs.gl_project }}
+      gh_owner: ${{ steps.export.outputs.gh_owner }}
+      gh_repo: ${{ steps.export.outputs.gh_repo }}
+      auto_create: ${{ steps.export.outputs.auto_create }}
+      delete_first: ${{ steps.export.outputs.delete_first }}
+      migrate_mrs: ${{ steps.export.outputs.migrate_mrs }}
+    
     env:
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}  # PAT stored in Secrets
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+
+      # Only from repository/environment variables (vars)
+      VAR_GL_URL: ${{ vars.GL_URL }}
+      VAR_GL_PROJECT: ${{ vars.GL_PROJECT }}
+      VAR_GH_OWNER: ${{ vars.GH_OWNER }}
+      VAR_GH_REPO: ${{ vars.GH_REPO }}
+      VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
+      VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
+      VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
+    
     steps:
-      - name: Install GitHub CLI and Actions Importer
+      - name: Install tools
+        shell: bash
         run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl git
           gh --version
           gh auth status || true
           gh extension install github/gh-actions-importer
-          gh actions-importer version
+         
