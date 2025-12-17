@@ -43,6 +43,8 @@ jobs:
           set -euo pipefail
           docker --version
           gh --version 
+          echo "${GH_PAT}" | gh auth login --with-token
+
       - name: "0.0) Verify tools & authenticate (Docker + gh)"
         shell: bash
         run: |
