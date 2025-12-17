@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write  # needed to push commits
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -22,11 +22,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      # gh is preinstalled on GitHub-hosted runners; just authenticate it
-      # https://docs.github.com/.../use-github-cli
+      # gh is preinstalled on hosted runners; we only need to provide GH_TOKEN
+      # Reference: Using GitHub CLI in workflows
       - name: Authenticate GitHub CLI
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }} # or use github.token below
+          GH_TOKEN: ${{ secrets.GH_PAT }} # or use ${{ github.token }}
         run: |
           gh --version
           gh auth status || echo "gh will use GH_TOKEN from env."
@@ -71,4 +71,4 @@ jobs:
             echo "No changes to commit."
           else
             git commit -m "chore: migrate GitLab CI to GitHub Actions"
-                       git push
+            git push
