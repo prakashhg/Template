@@ -1,33 +1,29 @@
 
-# File: .github/workflows/Pipeline-converter.yml
-name: GitLab → GitHub Actions (Python-driven migration)
+# File: .github/workflows/identify-gitlab-ci.yml
+name: Identify repos that contain .gitlab-ci.yml
 
 on:
   workflow_dispatch:
     inputs:
       only_project:
-        description: "Only process this GitLab project path (must exist in REPO_LIST). Leave empty to process all."
+        description: "Optional: Only check this GitLab project path (must be present in REPO_LIST)."
         required: false
         default: ""
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 env:
   # Configure these in Settings → Variables
-  REPO_LIST: ${{ vars.REPO_LIST }}
-  MIGRATION_MODE: ${{ vars.MIGRATION_MODE }} # "dry-run" or "migrate"
-  GITLAB_API_URL: ${{ vars.GITLAB_API_URL }} # optional; defaults to https://gitlab.com/api/v4 inside script
+  REPO_LIST: ${{ vars.REPO_LIST }}          # newline CSV: gitlab_path,github_owner,github_repo
+  GITLAB_API_URL: ${{ vars.GITLAB_API_URL }} # optional; defaults to https://gitlab.com/api/v4 in the script
 
 jobs:
-  prepare:
-    name: "Build matrix"
+  identify:
+    name: Scan migrated repos for .gitlab-ci.yml
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - name: Checkout (for scripts/)
+      - name: Checkout (to access scripts/)
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -44,112 +40,19 @@ jobs:
             exit 1
           fi
 
-      - name: Build matrix JSON (Python)
-        id: matrix
+      - name: Run GitLab CI detector (Python)
+        shell: bash
         env:
           REPO_LIST: ${{ env.REPO_LIST }}
           ONLY_PROJECT: ${{ inputs.only_project }}
-        run: |
-          set -euo pipefail
-          python3 scripts/build_matrix.py
-          # Show script-generated outputs for debugging
-          cat "$GITHUB_OUTPUT"
-
-  migrate:
-    name: "Identify .gitlab-ci.yml and run Importer (one-by-one)"
-    needs: prepare
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
-    steps:
-      - name: Checkout (for scripts/)
-        uses: actions/checkout@v4
-
-      - name: Install prerequisites (Docker, jq, curl, gh)
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl
-          if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get install -y gh
-          fi
-          sudo service docker start || true
-          docker --version || true
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - name: Authenticate gh
-        shell: bash
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          echo "${GH_PAT}" | gh auth login --with-token
-          gh auth status
-
-      - name: Install/update Actions Importer
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh extension list | grep -q "github/gh-actions-importer" || gh extension install github/gh-actions-importer
-          gh actions-importer update || true
-
-      - name: Probe GitLab project for .gitlab-ci.yml (Python)
-        id: probe
-        shell: bash
-        env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
           GITLAB_API_URL: ${{ env.GITLAB_API_URL }}
-          GL_PATH: ${{ matrix.gl_path }}
         run: |
           set -euo pipefail
-          python3 scripts/gitlab_probe.py
-          # Show outputs for visibility
-          cat "$GITHUB_OUTPUT"
+          python3 scripts/gitlab_ci_detector.py
 
-      - name: Skip if no .gitlab-ci.yml
-        if: ${{ steps.probe.outputs.has_ci != 'true' }}
-        shell: bash
-        run: echo "Skipping: ${{ steps.probe.outputs.msg }}"
-
-      # --- Dry-run path (no parentheses; simple conditions only) ---
-      - name: Dry-run convert (preview workflow YAML)
-        if: ${{ steps.probe.outputs.has_ci == 'true' && env.MIGRATION_MODE != 'migrate' }}
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GL_PATH: ${{ matrix.gl_path }}
-          GH_OWNER: ${{ matrix.gh_owner }}
-          GH_REPO: ${{ matrix.gh_repo }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/run_importer.py dry-run "${GL_PATH}" "${GH_OWNER}" "${GH_REPO}"
-          ls -al importer-output || true
-
-      - name: Upload dry-run artifacts
-        if: ${{ steps.probe.outputs.has_ci == 'true' && env.MIGRATION_MODE != 'migrate' }}
+      - name: Upload report artifact
         uses: actions/upload-artifact@v4
         with:
-          name: importer-preview-${{ matrix.gh_owner }}-${{ matrix.gh_repo }}
-          path: importer-output
-
-      # --- Migrate path ---
-      - name: Migrate (open PR with converted workflow)
-        if: ${{ steps.probe.outputs.has_ci == 'true' && env.MIGRATION_MODE == 'migrate' }}
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GL_PATH: ${{ matrix.gl_path }}
-          GH_OWNER: ${{ matrix.gh_owner }}
-          GH_REPO: ${{ matrix.gh_repo }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/run_importer.py migrate "${GL_PATH}" "${GH_OWNER}" "${GH_REPO}"
-          echo "::notice title=Migration Triggered::Opened PR for ${GH_OWNER}/${GH_REPO}."
+          name: gitlab-ci-detection-report
+          path: reports/gitlab-ci-detection.csv
