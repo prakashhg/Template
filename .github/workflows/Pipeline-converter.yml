@@ -15,10 +15,10 @@ permissions:
   pull-requests: write
 
 env:
-  # Vars (configure in repo Settings → Variables)
+  # Configure these in Settings → Variables
   REPO_LIST: ${{ vars.REPO_LIST }}
   MIGRATION_MODE: ${{ vars.MIGRATION_MODE }} # "dry-run" or "migrate"
-  GITLAB_API_URL: ${{ vars.GITLAB_API_URL }} # optional; defaults to https://gitlab.com/api/v4 in scripts
+  GITLAB_API_URL: ${{ vars.GITLAB_API_URL }} # optional; defaults to https://gitlab.com/api/v4 inside script
 
 jobs:
   prepare:
@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/build_matrix.py
-          # debug: show output line written by the script
+          # Show script-generated outputs for debugging
           cat "$GITHUB_OUTPUT"
 
   migrate:
@@ -109,7 +109,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/gitlab_probe.py
-          # debug: show outputs
+          # Show outputs for visibility
           cat "$GITHUB_OUTPUT"
 
       - name: Skip if no .gitlab-ci.yml
@@ -117,8 +117,9 @@ jobs:
         shell: bash
         run: echo "Skipping: ${{ steps.probe.outputs.msg }}"
 
+      # --- Dry-run path (no parentheses; simple conditions only) ---
       - name: Dry-run convert (preview workflow YAML)
-        if: ${{ steps.probe.outputs.has_ci == 'true' and (env.MIGRATION_MODE == '' or env.MIGRATION_MODE == 'dry-run') }}
+        if: ${{ steps.probe.outputs.has_ci == 'true' && env.MIGRATION_MODE != 'migrate' }}
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
@@ -132,14 +133,15 @@ jobs:
           ls -al importer-output || true
 
       - name: Upload dry-run artifacts
-        if: ${{ steps.probe.outputs.has_ci == 'true' and (env.MIGRATION_MODE == '' or env.MIGRATION_MODE == 'dry-run') }}
+        if: ${{ steps.probe.outputs.has_ci == 'true' && env.MIGRATION_MODE != 'migrate' }}
         uses: actions/upload-artifact@v4
         with:
           name: importer-preview-${{ matrix.gh_owner }}-${{ matrix.gh_repo }}
           path: importer-output
 
+      # --- Migrate path ---
       - name: Migrate (open PR with converted workflow)
-        if: ${{ steps.probe.outputs.has_ci == 'true' and env.MIGRATION_MODE == 'migrate' }}
+        if: ${{ steps.probe.outputs.has_ci == 'true' && env.MIGRATION_MODE == 'migrate' }}
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
