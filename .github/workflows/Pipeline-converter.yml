@@ -1,0 +1,258 @@
+
+name: GitLab CI ➜ GitHub Actions (End-to-End Migration)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Choose importer path or fallback: importer-audit | importer-dry-run | importer-migrate | fallback-convert'
+        required: true
+        default: 'importer-migrate'
+      repos_file:
+        description: 'Path to file with GitHub repos (owner/repo per line)'
+        required: true
+        default: 'repos.txt'
+      base_branch:
+        description: 'Base branch for PRs (e.g., main)'
+        required: true
+        default: 'main'
+      gitlab_server_url:
+        description: 'GitLab base URL (e.g., https://gitlab.example.com). Leave default for gitlab.com'
+        required: false
+        default: 'https://gitlab.com'
+      auto_merge:
+        description: 'Enable auto-merge on created PRs (true/false)'
+        required: true
+        default: 'true'
+
+permissions:
+  contents: write        # allow pushing branches
+  pull-requests: write   # allow creating/merging PRs
+
+jobs:
+  # Build matrix from repos_file
+  fanout:
+    runs-on: ubuntu-latest
+    outputs:
+      repos_json: ${{ steps.matrix.outputs.repos_json }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        name: Build matrix from repos file
+        run: |
+          FILE="${{ github.event.inputs.repos_file }}"
+          if [ ! -f "$FILE" ]; then
+            echo "Repos file not found: $FILE" >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+import json, sys
+data=[l.strip() for l in open(sys.argv[1]).read().splitlines() if l.strip()]
+print(f"repos_json={json.dumps(data)}")
+PY
+          "$FILE" >> "$GITHUB_OUTPUT"
+
+  # PATH A: Use GitHub Actions Importer (audit / dry-run / migrate)
+  importer:
+    runs-on: ubuntu-latest
+    needs: [fanout]
+    if: startsWith(github.event.inputs.mode, 'importer-')
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJson(needs.fanout.outputs.repos_json) }}
+    env:
+      GH_TOKEN:          ${{ secrets.GH_IMPORTER_PAT }}   # required by Importer (workflow scope)
+      GITHUB_ACCESS_TOKEN: ${{ secrets.GH_IMPORTER_PAT }} # Importer reads .env vars; keep both for clarity
+      GITLAB_ACCESS_TOKEN: ${{ secrets.GITLAB_PAT }}
+      GITLAB_SERVER_URL: ${{ github.event.inputs.gitlab_server_url }}
+      BASE_BRANCH:        ${{ github.event.inputs.base_branch }}
+      AUTO_MERGE:         ${{ github.event.inputs.auto_merge }}
+
+    steps:
+      - name: Install GH CLI extension for Importer & ensure latest
+        run: |
+          set -e
+          gh extension install github/gh-actions-importer || true
+          gh actions-importer update
+        # Importer is a GH CLI extension driving a Dockerized converter. [2](https://docs.github.com/en/actions/tutorials/migrate-to-github-actions/automated-migrations/use-github-actions-importer)
+
+      - name: Configure Importer credentials (non-interactive)
+        run: |
+          # Prepare .env.local expected by Importer
+          cat > .env.local <<EOF
+GITHUB_ACCESS_TOKEN=${GITHUB_ACCESS_TOKEN}
+GITLAB_ACCESS_TOKEN=${GITLAB_ACCESS_TOKEN}
+GITLAB_SERVER_URL=${GITLAB_SERVER_URL}
+EOF
+
+      - name: Importer — AUDIT (Plan migration footprint)
+        if: github.event.inputs.mode == 'importer-audit'
+        run: |
+          # Organization-level audit; adjust flags for your tenancy.
+          # Produces an audit report of pipelines/jobs to help plan your migration.
+          gh actions-importer audit gitlab \
+            --output audit-${{ matrix.repo }}.json
+        # Audit/forecast/dry-run/migrate are first-class Importer commands. [2](https://docs.github.com/en/actions/tutorials/migrate-to-github-actions/automated-migrations/use-github-actions-importer)
+
+      - name: Importer — DRY-RUN (Generate workflows without PR)
+        if: github.event.inputs.mode == 'importer-dry-run'
+        run: |
+          # Converts GitLab pipeline to a GitHub workflow YAML (no PR), so you can inspect.
+          # Typical flags: source project & target repo. Adjust for your map.
+          gh actions-importer dry-run gitlab \
+            --output-dir ./dryrun-${{ matrix.repo }} \
+            --target-repo ${{ matrix.repo }}
+        # Dry-run converts pipelines to YAML outputs for review. [2](https://docs.github.com/en/actions/tutorials/migrate-to-github-actions/automated-migrations/use-github-actions-importer)
+
+      - name: Importer — MIGRATE (Convert & open PR)
+        if: github.event.inputs.mode == 'importer-migrate'
+        run: |
+          # Converts pipelines and opens a PR with the new workflow(s) in ${{ matrix.repo }}.
+          # You can pass base branch and mapping options where applicable.
+          gh actions-importer migrate gitlab \
+            --target-repo ${{ matrix.repo }} \
+            --base-branch "${BASE_BRANCH}"
+        # Migrate converts and opens PRs automatically for GitLab → Actions. [1](https://docs.github.com/enterprise-cloud@latest/actions/migrating-to-github-actions/using-github-actions-importer-to-automate-migrations/migrating-from-gitlab-with-github-actions-importer)
+
+      - name: (Optional) Enable auto-merge on PRs created by Importer
+        if: github.event.inputs.mode == 'importer-migrate' && env.AUTO_MERGE == 'true'
+        run: |
+          # If your repos allow auto-merge, this enables "merge when ready".
+          # We query the latest PR for ${{ matrix.repo }} and enable auto-merge.
+          PR_URL=$(gh pr list --repo "${{ matrix.repo }}" --state open --search "Migrate GitLab" --json url --jq '.[0].url' || true)
+          if [ -n "$PR_URL" ]; then
+            gh pr merge "$PR_URL" --auto --squash --delete-branch || true
+          fi
+        # Auto-merge honors branch protection: required reviews/checks must pass first. [3](https://github.blog/news-insights/product-news/github-actions-importer-is-now-generally-available/)
+
+  # PATH B: Fallback — detect .gitlab-ci.yml already in the GitHub repo, convert, and PR
+  fallback:
+    runs-on: ubuntu-latest
+    needs: [fanout]
+    if: github.event.inputs.mode == 'fallback-convert'
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJson(needs.fanout.outputs.repos_json) }}
+    env:
+      GH_TOKEN:    ${{ secrets.GH_IMPORTER_PAT }}
+      BASE_BRANCH: ${{ github.event.inputs.base_branch }}
+      AUTO_MERGE:  ${{ github.event.inputs.auto_merge }}
+    steps:
+      - name: Clone repo
+        run: |
+          set -e
+          gh repo clone "${{ matrix.repo }}" target -- -q
+          cd target
+          git config user.name  "ci-migration-bot"
+          git config user.email "ci-migration-bot@users.noreply.github.com"
+
+      - name: Detect .gitlab-ci.yml
+        id: detect
+        working-directory: target
+        run: |
+          if [ -f ".gitlab-ci.yml" ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Skip if not found
+        if: steps.detect.outputs.found != 'true'
+        run: echo "No .gitlab-ci.yml in ${{ matrix.repo }}, skipping."
+
+      - name: Create inline converter (basic mapping)
+        if: steps.detect.outputs.found == 'true'
+        working-directory: target
+        run: |
+          cat > gitlabci_to_actions.py <<'PY'
+#!/usr/bin/env python3
+import os, yaml
+from pathlib import Path
+WORKFLOW_DIR=".github/workflows"; WORKFLOW_FILE="ci-converted.yml"
+def load_yaml(p): return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+def write_yaml(p,data): p.parent.mkdir(parents=True,exist_ok=True); p.write_text(yaml.safe_dump(data,sort_keys=False),encoding="utf-8")
+def convert(ci):
+  wf={"name":"CI (converted)","on":{"push":{"branches":["**"]},"pull_request":{"branches":["**"]},"workflow_dispatch":{}}, "jobs":{}}
+  stages=ci.get("stages") or []; globals=ci.get("variables") or {}; defaults=ci.get("default") or {}
+  gk={"stages","variables","workflow","default","include","spec"}
+  jobs=[k for k,v in ci.items() if isinstance(v,dict) and k not in gk]
+  stage_of={j: ci[j].get("stage", (stages[0] if stages else "build")) for j in jobs}
+  def needs_for(job):
+    s=stage_of[job]; 
+    if not stages or s not in stages: return []
+    idx=stages.index(s); prev=set(stages[:idx])
+    return [jn for jn in jobs if stage_of[jn] in prev]
+  for jn in jobs:
+    j=ci[jn]; job={}
+    job["runs-on"]="ubuntu-latest"
+    image=j.get("image") or defaults.get("image")
+    if image: job["container"]=image
+    env={}; env.update(globals); env.update(j.get("variables") or {})
+    if env: job["env"]=env
+    if j.get("allow_failure"): job["continue-on-error"]=True
+    n=needs_for(jn); 
+    if n: job["needs"]=n
+    services=j.get("services")
+    if services and isinstance(services,list):
+      svc={}
+      for s in services:
+        if isinstance(s,str):
+          label=s.split("/")[-1].split(":")[0].replace("-","_"); svc[label]={"image":s}
+      job["services"]=svc
+    steps=[{"uses":"actions/checkout@v4"}]
+    for c in j.get("before_script", []): steps.append({"name":"before","run":c})
+    for c in j.get("script", []):        steps.append({"name":"run","run":c})
+    for c in j.get("after_script", []):  steps.append({"name":"after","run":c})
+    cache=j.get("cache")
+    if cache and isinstance(cache,dict) and cache.get("paths"):
+      steps.insert(1,{"name":"Cache","uses":"actions/cache@v4","with":{"path":"\n".join(cache["paths"]),"key":"${{ runner.os }}-cache-${{ hashFiles('**/*') }}","restore-keys":"${{ runner.os }}-cache-"}})
+    arts=j.get("artifacts")
+    if isinstance(arts,dict) and arts.get("paths"):
+      steps.append({"name":"Upload artifacts","uses":"actions/upload-artifact@v4","with":{"name":f"{jn}-artifacts","path":"\n".join(arts["paths"])}})
+    job["steps"]=steps; wf["jobs"][jn]=job
+  return wf
+root=Path("."); ci=load_yaml(root/".gitlab-ci.yml"); wf=convert(ci); out=root/WORKFLOW_DIR/WORKFLOW_FILE
+write_yaml(out,wf); print(f"Wrote {out}")
+PY
+          chmod +x gitlabci_to_actions.py
+
+      - name: Convert GitLab CI ➜ GitHub Actions
+        if: steps.detect.outputs.found == 'true'
+        working-directory: target
+        run: |
+          set -e
+          python3 gitlabci_to_actions.py
+
+      - name: Create migration branch, commit & push
+        if: steps.detect.outputs.found == 'true'
+        id: branch
+        working-directory: target
+        run: |
+          set -e
+          BR="ci-migration/$(date +%Y%m%d-%H%M%S)"
+          git checkout -b "$BR"
+          git add .github/workflows
+          if git diff --cached --quiet; then
+            echo "No changes to commit; skipping."
+            echo "branch=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git commit -m "Migrate GitLab CI ➜ GitHub Actions (auto-generated)"
+          git push -u origin "$BR"
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR
+        if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != ''
+        id: pr
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ env.GH_TOKEN }}
+        run: |
+          gh pr create --base "${{ env.BASE_BRANCH }}" --head "${{ steps.branch.outputs.branch }}" \
+            --title "Migrate GitLab CI ➜ GitHub Actions" \
+            --body "Automated conversion of .gitlab-ci.yml to GitHub Actions workflows"
+
+      - name: (Optional) Enable auto-merge
+        if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != '' && env.AUTO_MERGE == 'true'
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ env.GH_TOKEN }}
+        run: |
+                   PR_URL=$(gh pr list --state open --json url --jq '.[0].url' || true)
