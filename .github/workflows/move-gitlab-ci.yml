@@ -28,6 +28,7 @@ jobs:
       VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
       VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
       VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
+      GH_TOKEN: ${{ github.token }}
     
     steps:
       - name: Install tools with Docker
