@@ -39,113 +39,71 @@ jobs:
       VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
 
     steps:
-      - name: Install tools
+      - name: Show repository context
+        run: |
+          echo "Repo : $GITHUB_REPOSITORY"
+          echo "Ref  : $GITHUB_REF"
+          echo "SHA  : $GITHUB_SHA"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Locate .gitlab-ci file(s)
+        id: locate
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl git
+          mapfile -t FILES < <(find . -type f \( \
+              -name ".gitlab-ci.yml" -o \
+              -name ".gitlab-ci.yaml" -o \
+              -name ".gitlab-ci" \
+            \) -print)
 
-      - name: Resolve configuration (vars/secrets only)
-        id: cfg
-        shell: bash
-        run: |
-          set -euo pipefail
-          GL_URL="${VAR_GL_URL:-https://gitlab.com}"
-          GL_PROJECT="${VAR_GL_PROJECT:-}"
-          GH_OWNER="${VAR_GH_OWNER:-}"
-          GH_REPO="${VAR_GH_REPO:-}"
-          AUTO_CREATE="${VAR_AUTO_CREATE:-true}"
-          DELETE_FIRST="${VAR_DELETE_FIRST:-false}"
-          MIGRATE_MRS="${VAR_MIGRATE_MRS:-true}"
-
-          [[ -z "${GL_PROJECT}" ]] && echo "ERROR: GL_PROJECT required (vars)" && exit 1
-          [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]] && echo "ERROR: GH_OWNER/GH_REPO required (vars)" && exit 1
-          [[ -z "${GL_TOKEN:-}" ]] && echo "ERROR: Missing secret GITLAB_TOKEN" && exit 1
-          [[ -z "${GH_PAT:-}" ]] && echo "ERROR: Missing secret GH_PAT" && exit 1
-
-          {
-            echo "GL_URL=${GL_URL}"
-            echo "GL_PROJECT=${GL_PROJECT}"
-            echo "GH_OWNER=${GH_OWNER}"
-            echo "GH_REPO=${GH_REPO}"
-            echo "AUTO_CREATE=${AUTO_CREATE}"
-            echo "DELETE_FIRST=${DELETE_FIRST}"
-            echo "MIGRATE_MRS=${MIGRATE_MRS}"
-            echo "WORKDIR=/tmp/mirror-work"
-          } >> "$GITHUB_ENV"
-
-      - name: Export job outputs
-        id: export
-        shell: bash
-        run: |
-          {
-            echo "gl_url=${GL_URL}"
-            echo "gl_project=${GL_PROJECT}"
-            echo "gh_owner=${GH_OWNER}"
-            echo "gh_repo=${GH_REPO}"
-            echo "auto_create=${AUTO_CREATE}"
-            echo "delete_first=${DELETE_FIRST}"
-            echo "migrate_mrs=${MIGRATE_MRS}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Optionally delete destination repository (DANGER)
-        if: env.DELETE_FIRST == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          REPO_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-            -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-            "${REPO_URL}")
-          echo "Delete HTTP status: ${STATUS}"
-          if [[ "${STATUS}" != "204" && "${STATUS}" != "404" ]]; then
-            echo "ERROR: Delete failed (HTTP ${STATUS})."; exit 1
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "❌ No .gitlab-ci file found anywhere in the repository."
+            echo "Searched: .gitlab-ci.yml, .gitlab-ci.yaml, .gitlab-ci"
+            exit 1
           fi
 
-      - name: Create GitHub repo if missing
-        if: env.AUTO_CREATE == 'true'
-        shell: bash
+          echo "✅ Found ${#FILES[@]} GitLab CI file(s):"
+          for f in "${FILES[@]}"; do echo " - ${f}"; done
+
+          # Prefer root-level file if present; else first match
+          pick() { [ -f "$1" ] && echo "$1"; }
+          PREFERRED="$(pick ./.gitlab-ci.yml || pick ./.gitlab-ci.yaml || pick ./.gitlab-ci || echo "")"
+          if [ -z "$PREFERRED" ]; then PREFERRED="${FILES[0]}"; fi
+          echo "Using pipeline file: $PREFERRED"
+          echo "pipeline_path=$PREFERRED" >> "$GITHUB_OUTPUT"
+
+      - name: Install GitHub Actions Importer CLI extension
         run: |
-          set -euo pipefail
-          REPO_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${REPO_API}")
-          if [[ "${STATUS}" == "200" ]]; then
-            echo "Repo already exists."
+          gh --version
+          gh auth status || true
+          gh extension install github/gh-actions-importer
+          gh actions-importer version
+
+      - name: Convert GitLab CI to GitHub Actions
+        run: |
+          mkdir -p .github/workflows
+          gh actions-importer migrate gitlab \
+            --input "${{ steps.locate.outputs.pipeline_path }}" \
+            --output .github/workflows
+
+      - name: Show generated workflows
+        run: |
+          echo "Generated workflows under .github/workflows:"
+          ls -la .github/workflows || true
+
+      - name: Commit converted workflows
+        if: ${{ inputs.commit_result == 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
           else
-            MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
-            if [[ "${GH_OWNER}" == "${MY_LOGIN}" ]]; then
-              CREATE_URL="https://api.github.com/user/repos"
-            else
-              CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
-            fi
-            PAYLOAD=$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
-            RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Content-Type: application/json" -d "${PAYLOAD}" "${CREATE_URL}")
-            HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
-            [[ "${HTTP}" == "201" ]] || { echo "Failed to create repo (HTTP ${HTTP})."; exit 1; }
-          fi
-          echo "GH repo ready: https://github.com/${GH_OWNER}/${GH_REPO}"
-          sleep 1
-
-      - name: Clone GitLab mirror (branches & commits)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "${WORKDIR}"
-          cd "${WORKDIR}"
-          HOST="${GL_URL#*://}"
-          SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${GL_PROJECT}.git"
-          echo "Cloning --mirror from ${GL_URL}/${GL_PROJECT}"
-          git clone --mirror "${SRC_URL}" src.git
-          git -C src.git show-ref | head -n 10 || true
-
-      - name: Push mirror to GitHub (branches & commits)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${WORKDIR}/src.git"
-          PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
-          git remote remove github 2>/dev/null || true
-          git remote add github "${PUSH_URL}"
-          echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
-          git push --mirror github
+            git commit -m "chore: convert GitLab CI to GitHub Actions via Importer"
+            git push
