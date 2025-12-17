@@ -1,33 +1,67 @@
 
-name: Convert GitLab CI to GitHub Actions Workflow (No gh CLI)
+name: Setup GitHub Actions Importer
 
 on:
-  workflow_dispatch: {}
-
-permissions:
-  contents: write
-  pull-requests: write
+  workflow_dispatch:
 
 jobs:
-  convert_gitlab_ci_to_github_actions:
+  repo_migration_commit_sync:
+    name: "1) Repo Migration · 1.1 Pipeline migration"
     runs-on: ubuntu-latest
-
+    outputs:
+      gl_url: ${{ steps.export.outputs.gl_url }}
+      gl_project: ${{ steps.export.outputs.gl_project }}
+      gh_owner: ${{ steps.export.outputs.gh_owner }}
+      gh_repo: ${{ steps.export.outputs.gh_repo }}
+      auto_create: ${{ steps.export.outputs.auto_create }}
+      delete_first: ${{ steps.export.outputs.delete_first }}
+      migrate_mrs: ${{ steps.export.outputs.migrate_mrs }}
+      pr_url: ${{ steps.migrate.outputs.pr_url }}
+    
     env:
-      GH_PAT: ${{ secrets.GH_PAT }}           # Must include repo + workflow scopes
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}   # Optional for importer
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT: ${{ secrets.GH_PAT }}
       VAR_GL_URL: ${{ vars.GL_URL }}
       VAR_GL_PROJECT: ${{ vars.GL_PROJECT }}
       VAR_GH_OWNER: ${{ vars.GH_OWNER }}
       VAR_GH_REPO: ${{ vars.GH_REPO }}
+      VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
+      VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
+      VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
       GH_TOKEN: ${{ github.token }}
-
+    
     steps:
-      - name: "Step 1: Install tools"
+      - name: Install tools with Docker
+        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y git curl jq
-          docker --version || { echo "❌ Docker not available"; exit 1; }
+          sudo apt-get install -y jq curl git
+          gh auth status || true
+          gh extension install github/gh-actions-importer
+          set -euo pipefail
+          docker --version
+          gh --version 
+          echo "${GH_PAT}" | gh auth login --with-token
+
+      - name: "Step 2: Verify GH_PAT and repo existence via GitHub API"
+        id: check_repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${GH_PAT:-}" ]] || { echo "❌ Missing GH_PAT secret (needs 'workflow' + 'repo' scopes)"; exit 1; }
+
+          REPO_API="https://api.github.com/repos/${VAR_GH_OWNER}/${VAR_GH_REPO}"
+          RESP="$(curl -s -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" "${REPO_API}")"
+          if echo "${RESP}" | jq -e '.message | select(.=="Not Found")' >/dev/null; then
+            echo "❌ Repo not found: ${VAR_GH_OWNER}/${VAR_GH_REPO}"
+            exit 1
+          fi
+
+          DEFAULT_BRANCH="$(echo "${RESP}" | jq -r '.default_branch')"
+          [[ -n "${DEFAULT_BRANCH}" && "${DEFAULT_BRANCH}" != "null" ]] || DEFAULT_BRANCH="main"
+          echo "default_branch=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "✅ Repo exists. Default branch: ${DEFAULT_BRANCH}"
 
       - name: "Step 2: Clone GitHub repo using GH_PAT"
         run: |
@@ -38,71 +72,3 @@ jobs:
           git clone "${REPO_URL}" "${WORKDIR}/repo"
           cd "${WORKDIR}/repo"
           echo "✅ Repo cloned."
-
-      - name: "Step 3: Detect .gitlab-ci.yml"
-        id: detect
-        run: |
-          set -euo pipefail
-          REPO_DIR="${WORKDIR}/repo"
-          if [[ -f "${REPO_DIR}/.gitlab-ci.yml" ]]; then
-            echo "gitlab_ci_path=${REPO_DIR}/.gitlab-ci.yml" >> "$GITHUB_OUTPUT"
-            echo "✅ Found .gitlab-ci.yml"
-          else
-            echo "gitlab_ci_path=" >> "$GITHUB_OUTPUT"
-            echo "ℹ️ No .gitlab-ci.yml found; exiting."
-            exit 0
-          fi
-
-      - name: "Step 4: Run GitHub Actions Importer via Docker"
-        if: ${{ steps.detect.outputs.gitlab_ci_path != '' }}
-        run: |
-          set -euo pipefail
-          SRC="${{ steps.detect.outputs.gitlab_ci_path }}"
-          OUTDIR="${WORKDIR}/converted"
-          mkdir -p "${OUTDIR}"
-          docker run --rm \
-            -e GITHUB_ACCESS_TOKEN="${GH_PAT}" \
-            -e GITLAB_ACCESS_TOKEN="${GL_TOKEN}" \
-            -e GITHUB_INSTANCE_URL="https://github.com" \
-            -e GITLAB_INSTANCE_URL="${VAR_GL_URL:-https://gitlab.com}" \
-            -v "${WORKDIR}/repo:/repo" \
-            -v "${OUTDIR}:/output" \
-            ghcr.io/github/gh-actions-importer:latest \
-            migrate gitlab \
-            --source-file-path "/repo/.gitlab-ci.yml" \
-            --output-dir "/output" \
-            --namespace "local" \
-            --project "local"
-          echo "✅ Conversion complete. Files in ${OUTDIR}:"
-          ls -la "${OUTDIR}"
-
-      - name: "Step 5: Commit converted workflow and push branch"
-        if: ${{ steps.detect.outputs.gitlab_ci_path != '' }}
-        run: |
-          set -euo pipefail
-          cd "${WORKDIR}/repo"
-          mkdir -p .github/workflows
-          cp "${WORKDIR}/converted"/*.yml .github/workflows/
-          git config user.name "actions-bot"
-          git config user.email "actions@users.noreply.github.com"
-          BRANCH="ci-migration-$(date +%s)"
-          git checkout -b "${BRANCH}"
-          git add .github/workflows
-          git commit -m "Add converted GitHub Actions workflow from .gitlab-ci.yml"
-          git push origin "${BRANCH}"
-
-      - name: "Step 6: Open PR via GitHub API"
-        if: ${{ steps.detect.outputs.gitlab_ci_path != '' }}
-        run: |
-          set -euo pipefail
-          API="https://api.github.com/repos/${VAR_GH_OWNER}/${VAR_GH_REPO}/pulls"
-          DATA=$(jq -n \
-            --arg title "Convert .gitlab-ci.yml to GitHub Actions" \
-            --arg head "${BRANCH}" \
-            --arg base "main" \
-            --arg body "This PR adds a workflow converted from .gitlab-ci.yml using GitHub Actions Importer." \
-            '{title:$title, head:$head, base:$base, body:$body}')
-          curl -s -X POST -H "Authorization: token ${GH_PAT}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "${API}" -d "${DATA}"
-          echo "✅ PR
