@@ -1,33 +1,14 @@
-
-name: Convert GitLab CI (owner-wide)
+name: Mirroring (GitLab → GitHub) + Trackers migration [Production]
 
 on:
-  workflow_dispatch:
-    inputs:
-      gh_owner:
-        description: "GitHub owner (user/org) to scan for repos"
-        required: true
-        default: "prakashhgworking"
-      repo_filter:
-        description: "Optional substring to filter repositories (e.g., 'service-')"
-        required: false
-        default: ""
-      include_archived:
-        description: "Include archived repos (true/false)"
-        required: true
-        default: "false"
-      commit_and_pr:
-        description: "Create branch, commit, push & open PR (true/false)"
-        required: true
-        default: "true"
-      max_parallel:
-        description: "Max parallel repos to process"
-        required: true
-        default: "4"
+  push:
+  delete:
+  workflow_dispatch: {}    # no inputs - you trigger it manually if needed
 
 permissions:
-  contents: write         # to push branches/commits
-  pull-requests: write    # to open PRs
+  contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
   discover_repos:
