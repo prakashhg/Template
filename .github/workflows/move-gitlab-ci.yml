@@ -1,68 +1,121 @@
-
-name: Move GitLab CI file to GitHub Workflows (PR)
+name: Migrate GitLab CI to GitHub Actions
 
 on:
-  workflow_dispatch:  # Run manually from the Actions tab
 
-permissions:
-  contents: write       # create branch and commit
-  pull-requests: write  # open PR
+  workflow_dispatch:
+
+    inputs:
+
+      commit_result:
+
+        description: "Commit converted workflow to repo"
+
+        required: true
+
+        default: "true"
+
+
 
 jobs:
-  move-and-pr:
-    runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+  migrate:
 
-      - name: Detect and move file
-        id: detect_move
-        shell: bash
-        run: |
-          set -euo pipefail
+    runs-on: ubuntu-latest
 
-          echo "🔎 Looking for .gitlab-ci.yml or .gitlab-ci.yaml at repository root..."
-          SRC=""
-          [[ -f ".gitlab-ci.yml" ]] && SRC=".gitlab-ci.yml"
-          [[ -z "${SRC}" && -f ".gitlab-ci.yaml" ]] && SRC=".gitlab-ci.yaml"
 
-          if [[ -z "${SRC}" ]]; then
-            echo "No GitLab CI file found at root. Exiting without changes."
-            echo "noop=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
 
-          mkdir -p .github/workflows
-          TARGET=".github/workflows/gitlab-pipeline-legacy.yml"
+    permissions:
 
-          # If target exists and content is identical, do nothing
-          if [[ -f "${TARGET}" ]] && cmp -s "${SRC}" "${TARGET}"; then
-            echo "Target already exists with identical content. No changes required."
-            echo "noop=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+      contents: write
 
-          # Use git mv if source is tracked; otherwise mv then add
-          if git ls-files --error-unmatch "${SRC}" >/dev/null 2>&1; then
-            git mv "${SRC}" "${TARGET}"
-          else
-            mv "${SRC}" "${TARGET}"
-            git add "${TARGET}"
-            git rm --cached "${SRC}" || true
-          fi
 
-          echo "noop=false" >> "$GITHUB_OUTPUT"
 
-      - name: Create Pull Request
-        if: ${{ steps.detect_move.outputs.noop == 'false' }}
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ci/move-gitlab-ci-to-workflows
-          commit-message: "Move .gitlab-ci to .github/workflows for later conversion"
-          title: "Move .gitlab-ci to .github/workflows"
-          body: |
-            This PR moves the GitLab CI file into `.github/workflows/gitlab-pipeline-legacy.yml`.
+    steps:
+
+      - name: Checkout repository
+
+        uses: actions/checkout@v4
+
+
+
+      - name: Install GitHub CLI
+
+        uses: cli/cli@v2
+
+
+
+      - name: Install GitHub Actions Importer
+
+        run: |
+
+          gh extension install github/gh-actions-importer
+
+
+
+      - name: Authenticate GitHub CLI
+
+        run: |
+
+          echo "${{ secrets.GH_PAT }}" | gh auth login --with-token
+
+
+
+      - name: Verify GitLab CI file exists
+
+        run: |
+
+          if [ ! -f ".gitlab-ci.yml" ]; then
+
+            echo "❌ .gitlab-ci.yml not found"
+
+            exit 1
+
+          fi
+
+          echo "✅ Found .gitlab-ci.yml"
+
+
+
+      - name: Convert GitLab CI to GitHub Actions
+
+        run: |
+
+          gh actions-importer migrate gitlab \
+
+            --input .gitlab-ci.yml \
+
+            --output .github/workflows \
+
+            --gitlab-access-token "${{ secrets.GITLAB_TOKEN }}" \
+
+            --gitlab-server-url "https://${{ secrets.GITLAB_HOST }}"
+
+
+
+      - name: List converted workflows
+
+        run: |
+
+          echo "Generated workflows:"
+
+          ls -la .github/workflows
+
+
+
+      - name: Commit converted workflow
+
+        if: ${{ github.event.inputs.commit_result == 'true' }}
+
+        run: |
+
+          git config user.name "github-actions"
+
+          git config user.email "github-actions@github.com"
+
+
+
+          git add .github/workflows
+
+          git commit -m "chore: migrate GitLab CI to GitHub Actions"
+
+          git push
