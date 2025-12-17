@@ -1,0 +1,101 @@
+
+name: Move GitLab CI file to GitHub Workflows
+
+on:
+  # Run this manually from the Actions tab
+  workflow_dispatch:
+
+permissions:
+  contents: write   # allows committing & pushing
+
+jobs:
+  move-gitlab-ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (default branch)
+        uses: actions/checkout@v4
+        with:
+          # fetch full history so we can create a commit reliably
+          fetch-depth: 0
+
+      - name: Ensure we're on a writable branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Determine current branch; for workflow_dispatch this is typically your default branch.
+          current_branch="$(git rev-parse --abbrev-ref HEAD)"
+          if [[ "${current_branch}" == "HEAD" || -z "${current_branch}" ]]; then
+            echo "Detected detached HEAD; switching to the repository's default branch..."
+            default_branch="$(git remote show origin | sed -n '/HEAD branch/s/.*: //p')"
+            git checkout "${default_branch}"
+            current_branch="${default_branch}"
+          fi
+          echo "✅ Operating on branch: ${current_branch}"
+
+          # Configure git identity & safe directory
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$(pwd)"
+
+      - name: Identify and move .gitlab-ci file
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "🔎 Searching for .gitlab-ci.yml or .gitlab-ci.yaml at repo root..."
+          candidate=""
+          if [[ -f ".gitlab-ci.yml" ]]; then
+            candidate=".gitlab-ci.yml"
+          elif [[ -f ".gitlab-ci.yaml" ]]; then
+            candidate=".gitlab-ci.yaml"
+          fi
+
+          if [[ -z "${candidate}" ]]; then
+            echo "❌ No .gitlab-ci.yml or .gitlab-ci.yaml found at the repository root. Exiting without changes."
+            exit 0
+          fi
+
+          echo "✅ Found ${candidate}"
+          mkdir -p .github/workflows
+
+          target=".github/workflows/gitlab-pipeline-legacy.yml"
+
+          # If target already exists, and is identical, do nothing
+          if [[ -f "${target}" ]] && cmp -s "${candidate}" "${target}"; then
+            echo "ℹ️ Target ${target} already exists with identical content. No move needed."
+            exit 0
+          fi
+
+          # Move (rename) the file into workflows folder
+          # Use 'git mv' so git tracks the rename cleanly
+          if [[ -f "${target}" ]]; then
+            echo "ℹ️ ${target} exists; it will be overwritten with the current source content."
+            mv "${candidate}" "${target}"
+          else
+            git mv "${candidate}" "${target}" || mv "${candidate}" "${target}"
+          fi
+
+          echo "✅ Moved to ${target}"
+          echo "ℹ️ This file remains in GitLab CI syntax; convert later with your chosen approach."
+
+      - name: Commit & push changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Stage the moved file if 'git mv' fell back to plain 'mv'
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git add .github/workflows/gitlab-pipeline-legacy.yml || true
+          fi
+
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git commit -m "Move .gitlab-ci to .github/workflows for later conversion"
+            current_branch="$(git rev-parse --abbrev-ref HEAD)"
+            echo "🚀 Pushing commit to ${current_branch}..."
+            git push origin "${current_branch}"
+            echo "✅ Changes pushed."
+          else
+            echo "ℹ️ No changes to commit."
+          fi
