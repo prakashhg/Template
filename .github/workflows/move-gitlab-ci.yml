@@ -27,12 +27,12 @@ jobs:
       VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
       VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
       VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
-      
+
     outputs:
       pr_url: ${{ steps.migrate.outputs.pr_url }}
     
     steps:
-      - name: Install tools
+      - name: Install tools with Docker
         shell: bash
         run: |
           set -euo pipefail
@@ -42,10 +42,8 @@ jobs:
           gh auth status || true
           gh extension install github/gh-actions-importer
           set -euo pipefail
-          # Ensure Docker & gh CLI are available on runner
           docker --version || { echo "❌ Docker not available"; exit 1; }
           gh --version || { echo "❌ gh CLI not available"; exit 1; }
-          # Authenticate gh CLI using GH_PAT (must have 'workflow' scope)
           [[ -n "${GH_PAT:-}" ]] || { echo "❌ Missing GH_PAT secret (needs 'workflow' + 'repo' scopes)"; exit 1; }
           echo "${GH_PAT}" | gh auth login --with-token
 
