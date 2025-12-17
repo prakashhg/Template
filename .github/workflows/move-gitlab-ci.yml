@@ -68,7 +68,6 @@ jobs:
             This PR moves the GitLab CI file into `.github/workflows/gitlab-pipeline-legacy.yml`.
 
             Notes:
-            - The file remains in **GitLab CI syntax** and will be converted later.
+            - The            - The file remains in **GitLab CI syntax** and will be converted later.
             - We use a PR instead of direct push to avoid protected-branch restrictions.
           labels: ["ci", "migration"]
-          sign
