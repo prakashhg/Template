@@ -66,26 +66,25 @@ jobs:
       matrix:
         repo: ${{ fromJson(needs.fanout.outputs.repos_json) }}
     env:
-      # Importer expects these environment variables / tokens
-      GH_TOKEN:              ${{ secrets.GH_IMPORTER_PAT }}
-      GITHUB_ACCESS_TOKEN:   ${{ secrets.GH_IMPORTER_PAT }}
-      GITLAB_ACCESS_TOKEN:   ${{ secrets.GITLAB_PAT }}
-      GITLAB_SERVER_URL:     ${{ github.event.inputs.gitlab_server_url }}
-      BASE_BRANCH:           ${{ github.event.inputs.base_branch }}
-      AUTO_MERGE:            ${{ github.event.inputs.auto_merge }}
+      # Your secrets:
+      GH_TOKEN:            ${{ secrets.GH_TOKEN }}
+      GITLAB_TOKEN:        ${{ secrets.GITLAB_TOKEN }}
+
+      # Variables expected by the Importer and gh CLI:
+      GITHUB_ACCESS_TOKEN: ${{ secrets.GH_TOKEN }}        # Importer needs this
+      GITLAB_ACCESS_TOKEN: ${{ secrets.GITLAB_TOKEN }}    # Importer needs this
+
+      # Inputs:
+      GITLAB_SERVER_URL:   ${{ github.event.inputs.gitlab_server_url }}
+      BASE_BRANCH:         ${{ github.event.inputs.base_branch }}
+      AUTO_MERGE:          ${{ github.event.inputs.auto_merge }}
 
     steps:
       - name: Ensure Docker & GitHub CLI available
         shell: bash
         run: |
           set -euo pipefail
-          if ! docker --version >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y docker.io
-            sudo systemctl start docker || true
-            sudo usermod -aG docker $USER || true
-          fi
-          docker --version
+          docker --version || (sudo apt-get update -y && sudo apt-get install -y docker.io && sudo systemctl start docker || true)
           gh --version || (echo "GitHub CLI not found" >&2; exit 1)
 
       - name: Install GH Actions Importer extension and update
@@ -101,8 +100,8 @@ jobs:
           set -euo pipefail
           # Provide .env.local for Importer (reads env vars when executing)
           cat > .env.local <<EOF
-GITHUB_ACCESS_TOKEN= ${GH_TOKEN}
-GITLAB_ACCESS_TOKEN= ${GITLAB_TOKEN}
+GITHUB_ACCESS_TOKEN=${GITHUB_ACCESS_TOKEN}
+GITLAB_ACCESS_TOKEN=${GITLAB_ACCESS_TOKEN}
 GITLAB_SERVER_URL=${GITLAB_SERVER_URL}
 EOF
 
@@ -156,7 +155,7 @@ EOF
       matrix:
         repo: ${{ fromJson(needs.fanout.outputs.repos_json) }}
     env:
-      GH_TOKEN:    ${{ secrets.GH_IMPORTER_PAT }}
+      GH_TOKEN:    ${{ secrets.GH_TOKEN }}               # for gh CLI
       BASE_BRANCH: ${{ github.event.inputs.base_branch }}
       AUTO_MERGE:  ${{ github.event.inputs.auto_merge }}
 
@@ -330,7 +329,7 @@ PY
             --body "Automated conversion of .gitlab-ci.yml to GitHub Actions workflows"
 
       - name: (Optional) Enable auto-merge
-        if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != '' && env.AUTO_MERGE == 'true'
+        if: steps.detect.outputs.found == '        if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != '' && env.AUTO_MERGE == 'true'
         working-directory: target
         env:
           GH_TOKEN: ${{ env.GH_TOKEN }}
@@ -338,5 +337,5 @@ PY
         run: |
           set -euo pipefail
           PRN=$(gh pr list --state open --json number,createdAt --jq 'sort_by(.createdAt) | reverse | .[0].number' || true)
-          if [ -n "${PRN:-}" ]; then          if [ -n "${PRN:-}" ]; then
+          if [ -n "${PRN:-}" ]; then
             gh pr merge "${PRN}" --auto --squash --delete-branch || true
