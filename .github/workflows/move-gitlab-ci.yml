@@ -1,121 +1,76 @@
+
 name: Migrate GitLab CI to GitHub Actions
 
 on:
-
-  workflow_dispatch:
-
-    inputs:
-
-      commit_result:
-
-        description: "Commit converted workflow to repo"
-
-        required: true
-
-        default: "true"
-
-
+  workflow_dispatch:
+    inputs:
+      commit_result:
+        description: "Commit converted workflow to repo"
+        required: true
+        default: "true"
 
 jobs:
+  migrate:
+    runs-on: ubuntu-latest
 
-  migrate:
+    permissions:
+      contents: write  # required to push commits
 
-    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # ensure full history if needed
 
+      - name: Install GitHub CLI
+        uses: actions/setup-gh@v5
 
+      - name: Install GitHub Actions Importer
+        run: |
+          gh extension install github/gh-actions-importer
 
-    permissions:
+      - name: Authenticate GitHub CLI
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}  # gh uses GH_TOKEN automatically; still compatible with login
+        run: |
+          echo "${{ secrets.GH_PAT }}" | gh auth login --with-token
+          gh auth status
 
-      contents: write
+      - name: Verify GitLab CI file exists
+        run: |
+          if [ ! -f ".gitlab-ci.yml" ]; then
+            echo "❌ .gitlab-ci.yml not found"
+            exit 1
+          fi
+          echo "✅ Found .gitlab-ci.yml"
 
+      - name: Convert GitLab CI to GitHub Actions
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_HOST: ${{ secrets.GITLAB_HOST }}
+        run: |
+          gh actions-importer migrate gitlab \
+            --input .gitlab-ci.yml \
+            --output .github/workflows \
+            --gitlab-access-token "${GITLAB_TOKEN}" \
+            --gitlab-server-url "https://${GITLAB_HOST}"
 
+      - name: List converted workflows
+        run: |
+          echo "Generated workflows:"
+          ls -la .github/workflows
 
-    steps:
+      - name: Commit converted workflow
+        if: ${{ github.event.inputs.commit_result == 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Checkout repository
-
-        uses: actions/checkout@v4
-
-
-
-      - name: Install GitHub CLI
-
-        uses: cli/cli@v2
-
-
-
-      - name: Install GitHub Actions Importer
-
-        run: |
-
-          gh extension install github/gh-actions-importer
-
-
-
-      - name: Authenticate GitHub CLI
-
-        run: |
-
-          echo "${{ secrets.GH_PAT }}" | gh auth login --with-token
-
-
-
-      - name: Verify GitLab CI file exists
-
-        run: |
-
-          if [ ! -f ".gitlab-ci.yml" ]; then
-
-            echo "❌ .gitlab-ci.yml not found"
-
-            exit 1
-
-          fi
-
-          echo "✅ Found .gitlab-ci.yml"
-
-
-
-      - name: Convert GitLab CI to GitHub Actions
-
-        run: |
-
-          gh actions-importer migrate gitlab \
-
-            --input .gitlab-ci.yml \
-
-            --output .github/workflows \
-
-            --gitlab-access-token "${{ secrets.GITLAB_TOKEN }}" \
-
-            --gitlab-server-url "https://${{ secrets.GITLAB_HOST }}"
-
-
-
-      - name: List converted workflows
-
-        run: |
-
-          echo "Generated workflows:"
-
-          ls -la .github/workflows
-
-
-
-      - name: Commit converted workflow
-
-        if: ${{ github.event.inputs.commit_result == 'true' }}
-
-        run: |
-
-          git config user.name "github-actions"
-
-          git config user.email "github-actions@github.com"
-
-
-
-          git add .github/workflows
-
-          git commit -m "chore: migrate GitLab CI to GitHub Actions"
-
-          git push
+          git add .github/workflows
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: migrate GitLab CI to GitHub Actions"
+            git push
+          fi
+``
