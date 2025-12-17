@@ -46,7 +46,6 @@ jobs:
 
       - name: "Step 2: Verify GH_PAT and repo existence via GitHub API"
         id: check_repo
-        shell: bash
         run: |
           set -euo pipefail
           [[ -n "${GH_PAT:-}" ]] || { echo "❌ Missing GH_PAT secret (needs 'workflow' + 'repo' scopes)"; exit 1; }
@@ -64,13 +63,10 @@ jobs:
           echo "✅ Repo exists. Default branch: ${DEFAULT_BRANCH}"
 
       - name: "Step 3: Clone repo using GH_PAT"
-        id: clone
-        shell: bash
         run: |
           set -euo pipefail
           WORKDIR="$(mktemp -d)"
           echo "WORKDIR=${WORKDIR}" >> "$GITHUB_ENV"
-
           REPO_URL="https://${GH_PAT}@github.com/${VAR_GH_OWNER}/${VAR_GH_REPO}.git"
           git clone "${REPO_URL}" "${WORKDIR}/repo"
           cd "${WORKDIR}/repo"
