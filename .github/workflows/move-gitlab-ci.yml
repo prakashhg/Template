@@ -14,27 +14,27 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write  # required to push commits
+      contents: write  # needed to push commits
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # ensure full history if needed
+          fetch-depth: 0
 
-      - name: Install GitHub CLI
-        uses: actions/setup-gh@v5
-
-      - name: Install GitHub Actions Importer
-        run: |
-          gh extension install github/gh-actions-importer
-
+      # gh is preinstalled on GitHub-hosted runners; just authenticate it
+      # https://docs.github.com/.../use-github-cli
       - name: Authenticate GitHub CLI
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}  # gh uses GH_TOKEN automatically; still compatible with login
+          GH_TOKEN: ${{ secrets.GH_PAT }} # or use github.token below
         run: |
-          echo "${{ secrets.GH_PAT }}" | gh auth login --with-token
-          gh auth status
+          gh --version
+          gh auth status || echo "gh will use GH_TOKEN from env."
+
+      - name: Install GitHub Actions Importer extension
+        run: |
+          gh extension install github/gh-actions-importer
+          gh actions-importer version
 
       - name: Verify GitLab CI file exists
         run: |
@@ -47,7 +47,7 @@ jobs:
       - name: Convert GitLab CI to GitHub Actions
         env:
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_HOST: ${{ secrets.GITLAB_HOST }}
+          GITLAB_HOST: ${{ secrets.GITLAB_HOST }} # e.g., gitlab.example.com
         run: |
           gh actions-importer migrate gitlab \
             --input .gitlab-ci.yml \
@@ -58,19 +58,17 @@ jobs:
       - name: List converted workflows
         run: |
           echo "Generated workflows:"
-          ls -la .github/workflows
+          ls -la .github/workflows || true
 
       - name: Commit converted workflow
-        if: ${{ github.event.inputs.commit_result == 'true' }}
+        if: ${{ inputs.commit_result == 'true' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add .github/workflows
+          git add .github/workflows || true
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
             git commit -m "chore: migrate GitLab CI to GitHub Actions"
-            git push
-          fi
-``
+                       git push
