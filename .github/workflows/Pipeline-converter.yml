@@ -16,20 +16,22 @@ permissions:
 env:
   # Configure these in Settings → Variables
   REPO_LIST: ${{ vars.REPO_LIST }}          # newline CSV: gitlab_path,github_owner,github_repo
-  GITLAB_API_URL: ${{ vars.GITLAB_API_URL }} # optional; defaults to https://gitlab.com/api/v4 in the script
+  GITLAB_API_URL: ${{ vars.GITLAB_API_URL }} # optional; default used below if empty
 
 jobs:
   identify:
     name: Scan migrated repos for .gitlab-ci.yml
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (to access scripts/)
+      - name: Checkout (not strictly required, but useful for artifacts path consistency)
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
+      - name: Install dependencies (jq, curl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
 
       - name: Validate inputs
         shell: bash
@@ -40,16 +42,87 @@ jobs:
             exit 1
           fi
 
-      - name: Run GitLab CI detector (Python)
+      - name: Detect .gitlab-ci.yml presence (Bash only; no Python)
         shell: bash
         env:
-          REPO_LIST: ${{ env.REPO_LIST }}
-          ONLY_PROJECT: ${{ inputs.only_project }}
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_API_URL: ${{ env.GITLAB_API_URL }}
         run: |
           set -euo pipefail
-          python3 scripts/gitlab_ci_detector.py
+
+          # --- configuration ---
+          API="${GITLAB_API_URL:-https://gitlab.com/api/v4}"
+          REPORT_DIR="reports"
+          REPORT_FILE="${REPORT_DIR}/gitlab-ci-detection.csv"
+
+          mkdir -p "${REPORT_DIR}"
+          echo "gitlab_project_path,github_owner,github_repo,default_branch,has_gitlab_ci_yml,http_status,message" > "${REPORT_FILE}"
+
+          # Convert input list into loop items
+          filter="${{ inputs.only_project }}"
+          # Build list lines: either all from REPO_LIST or the single ONLY_PROJECT (if provided without REPO_LIST)
+          lines=""
+          if [ -n "${REPO_LIST:-}" ]; then
+            lines="$(printf "%s\n" "${REPO_LIST}" | awk 'NF>0')"
+          fi
+          if [ -n "${filter}" ]; then
+            if [ -n "${lines}" ]; then
+              lines="$(printf "%s\n" "${lines}" | awk -F',' -v q="${filter}" '$1==q{print $0}')"
+              if [ -z "${lines}" ]; then
+                echo "ERROR: only_project='${filter}' not found in REPO_LIST"
+                exit 1
+              fi
+            else
+              # allow single-project run without REPO_LIST
+              lines="${filter},,"
+            fi
+          fi
+
+          # If still empty, error out
+          if [ -z "${lines}" ]; then
+            echo "ERROR: No repositories to process."
+            exit 1
+          fi
+
+          # Iterate
+          while IFS= read -r row; do
+            # csv: gl_path,gh_owner,gh_repo
+            IFS=',' read -r GL_PATH GH_OWNER GH_REPO <<< "${row}"
+
+            # URL-encode project path safely with jq
+            ENC_PROJ="$(jq -rn --arg x "${GL_PATH}" '$x|@uri')"
+            PROJ_URL="${API}/projects/${ENC_PROJ}"
+
+            # 1) Get default branch
+            CODE=$(curl -s -o /tmp/proj.json -w "%{http_code}" -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${PROJ_URL}")
+            if [ "${CODE}" != "200" ]; then
+              echo "${GL_PATH},${GH_OWNER},${GH_REPO},,false,${CODE},Failed to fetch project" >> "${REPORT_FILE}"
+              continue
+            fi
+            DEF_BRANCH="$(jq -r '.default_branch // empty' /tmp/proj.json)"
+            if [ -z "${DEF_BRANCH}" ]; then
+              echo "${GL_PATH},${GH_OWNER},${GH_REPO},,false,200,No default branch" >> "${REPORT_FILE}"
+              continue
+            fi
+
+            # 2) Check .gitlab-ci.yml on default branch
+            FILE_ENC="$(jq -rn --arg x ".gitlab-ci.yml" '$x|@uri')"
+            REF_ENC="$(jq -rn --arg x "${DEF_BRANCH}" '$x|@uri')"
+            FILE_URL="${API}/projects/${ENC_PROJ}/repository/files/${FILE_ENC}?ref=${REF_ENC}"
+
+            FCODE=$(curl -s -o /dev/null -w "%{http_code}" -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${FILE_URL}")
+            HAS_CI="false"
+            MSG="Not found"
+            if [ "${FCODE}" = "200" ]; then
+              HAS_CI="true"
+              MSG="Found"
+            fi
+
+            echo "${GL_PATH},${GH_OWNER},${GH_REPO},${DEF_BRANCH},${HAS_CI},${FCODE},${MSG}" >> "${REPORT_FILE}"
+          done <<< "${lines}"
+
+          # Write a brief summary to the job log
+          echo "----- Summary (first 20 lines) -----"
+          head -n 21 "${REPORT_FILE}" || true
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
