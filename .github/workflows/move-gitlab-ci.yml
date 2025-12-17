@@ -1,10 +1,12 @@
+
 name: Setup GitHub Actions Importer
+
 on:
   workflow_dispatch:
 
 jobs:
   repo_migration_commit_sync:
-    name: "1) Repo Migration · 1.1 Commit Sync"
+    name: "1) Pipeline-migrations
     runs-on: ubuntu-latest
     outputs:
       gl_url: ${{ steps.export.outputs.gl_url }}
