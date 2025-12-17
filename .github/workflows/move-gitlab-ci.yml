@@ -16,6 +16,7 @@ jobs:
       auto_create: ${{ steps.export.outputs.auto_create }}
       delete_first: ${{ steps.export.outputs.delete_first }}
       migrate_mrs: ${{ steps.export.outputs.migrate_mrs }}
+      pr_url: ${{ steps.migrate.outputs.pr_url }}
     
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
@@ -27,9 +28,6 @@ jobs:
       VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
       VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
       VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
-      
-    outputs:
-      pr_url: ${{ steps.migrate.outputs.pr_url }}
     
     steps:
       - name: Install tools with Docker
