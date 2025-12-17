@@ -73,4 +73,10 @@ jobs:
             echo "DELETE_FIRST=${DELETE_FIRST}"
             echo "MIGRATE_MRS=${MIGRATE_MRS}"
             echo "WORKDIR=/tmp/mirror-work"
+            set -euo pipefail
+            sudo apt-get update -y
+            sudo apt-get install -y jq curl git
+            gh --version
+            gh auth status || true
+            gh extension install github/gh-actions-importer
           } >> "$GITHUB_ENV"
