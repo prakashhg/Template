@@ -1,12 +1,117 @@
 
-name: Convert GitLab CI to GitHub Actions
+name: GitLab CI → GitHub Actions (local conversion)
 
 on:
   workflow_dispatch:
+    inputs:
+      commit_result:
+        description: "Commit converted workflow(s) back to the repo"
+        required: true
+        default: "true"
+
+permissions:
+  contents: write
 
 jobs:
-  convert:
+  convert_pipeline:
+    name: "Convert .gitlab-ci → Actions"
     runs-on: ubuntu-latest
+
+    # Keep parity with your template: centralize tokens & settings at job level
+    env:
+      GH_TOKEN: ${{ github.token }}  # gh requires this inside Actions
+      # Optional: if your .gitlab-ci.yml includes/extends remote GitLab templates,
+      # uncomment these and set them as repo/organization variables or secrets:
+      # GITLAB_HOST: ${{ vars.GL_URL }}          # e.g., https://gitlab.com
+      # GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}  # PAT with read_repository/api
+
     steps:
-      - name: Hello
-        run: echo "This minimal workflow parses and runs."
+      - name: Show repository context
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Repo: $GITHUB_REPOSITORY"
+          echo "Ref : $GITHUB_REF"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Locate GitLab CI file(s)
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t FILES < <(find . -type f \( \
+              -name ".gitlab-ci.yml"  -o \
+              -name ".gitlab-ci.yaml" -o \
+              -name ".gitlab-ci" \
+            \) -print)
+
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "❌ No .gitlab-ci file found anywhere in the repository."
+            echo "Searched: .gitlab-ci.yml, .gitlab-ci.yaml, .gitlab-ci"
+            exit 1
+          fi
+
+          echo "✅ Found ${#FILES[@]} GitLab CI file(s):"
+          printf ' - %s\n' "${FILES[@]}"
+
+          # Prefer a root-level file if present; otherwise pick the first match
+          pick() { [ -f "$1" ] && echo "$1"; }
+          PREFERRED="$(pick ./.gitlab-ci.yml || pick ./.gitlab-ci.yaml || pick ./.gitlab-ci || echo "")"
+          if [ -z "$PREFERRED" ]; then PREFERRED="${FILES[0]}"; fi
+
+          echo "Using pipeline file: $PREFERRED"
+          echo "pipeline_path=$PREFERRED" >> "$GITHUB_OUTPUT"
+
+      - name: Install GitHub Actions Importer (gh extension)
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh --version
+          gh auth status || true
+          gh extension install github/gh-actions-importer
+          gh actions-importer version
+
+      - name: Convert GitLab CI → GitHub Actions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .github/workflows
+
+          # If your GitLab CI references remote GitLab includes/templates,
+          # pass server URL and access token so the Importer can resolve them:
+          EXTRA_ARGS=()
+          if [ -n "${GITLAB_HOST:-}" ] && [ -n "${GITLAB_TOKEN:-}" ]; then
+            EXTRA_ARGS+=("--gitlab-server-url" "${GITLAB_HOST}")
+            EXTRA_ARGS+=("--gitlab-access-token" "${GITLAB_TOKEN}")
+          fi
+
+          gh actions-importer migrate gitlab \
+            --input "${{ steps.locate.outputs.pipeline_path }}" \
+            --output .github/workflows \
+            "${EXTRA_ARGS[@]}"
+
+      - name: Show generated workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Generated workflows under .github/workflows:"
+          ls -la .github/workflows || true
+
+      - name: Commit converted workflows
+        if: ${{ inputs.commit_result == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/workflows || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+                       git commit -m "chore: convert GitLab CI to GitHub Actions via gh-actions-importer"
+            git push
