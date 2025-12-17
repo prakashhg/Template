@@ -30,7 +30,7 @@ permissions:
   pull-requests: write   # create/merge PRs
 
 jobs:
-  # 1) Build matrix from repos_file
+  # 1) Build matrix from repos_file -------------------------------------------
   fanout:
     runs-on: ubuntu-latest
     outputs:
@@ -54,7 +54,7 @@ jobs:
           REPOS_JSON="$(python3 -c 'import json,sys; fp=sys.argv[1]; print(json.dumps([l.strip() for l in open(fp,"r",encoding="utf-8") if l.strip()]))' "$FILE")"
           echo "repos_json=${REPOS_JSON}" >> "$GITHUB_OUTPUT"
 
-  # 2A) PATH A: Use GitHub Actions Importer (audit / dry-run / migrate)
+  # 2A) PATH A: Use GitHub Actions Importer (audit / dry-run / migrate) -------
   importer:
     runs-on: ubuntu-latest
     needs: [fanout]
@@ -140,7 +140,7 @@ jobs:
             gh pr merge "${PRN}" --auto --squash --delete-branch || true
           fi
 
-  # 2B) PATH B: Fallback — detect .gitlab-ci.yml in the GitHub repo, convert, and PR
+  # 2B) PATH B: Fallback — detect .gitlab-ci.yml, convert, and PR -------------
   fallback:
     runs-on: ubuntu-latest
     needs: [fanout]
@@ -194,7 +194,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -c $'import sys,json\nfrom pathlib import Path\nimport yaml\nroot=Path(".")\nci_path=root/".gitlab-ci.yml"\nif not ci_path.exists():\n  print("No .gitlab-ci.yml",file=sys.stderr); sys.exit(0)\nci=yaml.safe_load(ci_path.read_text(encoding="utf-8")) or {}\nstages=ci.get("stages") or []\nglobals_=ci.get("variables") or {}\ndefaults=ci.get("default") or {}\nglobal_keys={"stages","variables","workflow","default","include","spec"}\njobs=[k for k,v in ci.items() if isinstance(v,dict) and k not in global_keys]\nstage_of={j:ci[j].get("stage",(stages[0] if stages else "build")) for j in jobs}\n\ndef needs_for(job):\n  s=stage_of[job]\n  if not stages or s not in stages: return []\n  idx=stages.index(s); prev=set(stages[:idx])\n  return [jn for jn in jobs if stage_of[jn] in prev]\n\nwf={\"name\":\"CI (converted)\",\"on\":{\"push\":{\"branches\":[\"**\"]},\"pull_request\":{\"branches\":[\"**\"]},\"workflow_dispatch\":{}},\"jobs\":{}}\nfor jn in jobs:\n  j=ci[jn]; job={}; job[\"runs-on\"]=\"ubuntu-latest\"\n  image=j.get(\"image\") or defaults.get(\"image\")\n  if image: job[\"container\"]=image\n  env={}; env.update(globals_); env.update(j.get(\"variables\") or {})\n  if env: job[\"env\"]=env\n  if j.get(\"allow_failure\"): job[\"continue-on-error\"]=True\n  n=needs_for(jn)\n  if n: job[\"needs\"]=n\n  services=j.get(\"services\")\n  if services and isinstance(services,list):\n    svc={}\n    for s in services:\n      if isinstance(s,str):\n        label=s.split(\"/\")[-1].split(\":\")[0].replace(\"-\",\"_\")\n        svc[label]={\"image\":s}\n    job[\"services\"]=svc\n  steps=[{\"uses\":\"actions/checkout@v4\"}]\n  for c in j.get(\"before_script\",[]): steps.append({\"name\":\"before\",\"run\":c})\n  for c in j.get(\"script\",[]):        steps.append({\"name\":\"run\",\"run\":c})\n  for c in j.get(\"after_script\",[]):  steps.append({\"name\":\"after\",\"run\":c})\n  cache=j.get(\"cache\")\n  if cache and isinstance(cache,dict) and cache.get(\"paths\"):\n    steps.insert(1,{\"name\":\"Cache\",\"uses\":\"actions/cache@v4\",\"with\":{\"path\":\"\\n\".join(cache[\"paths\"]),\"key\":\"${{ runner.os }}-cache-${{ hashFiles(\'**/*\') }}\",\"restore-keys\":\"${{ runner.os }}-cache-\"}})\n  arts=j.get(\"artifacts\")\n  if isinstance(arts,dict) and arts.get(\"paths\"):\n    steps.append({\"name\":\"Upload artifacts\",\"uses\":\"actions/upload-artifact@v4\",\"with\":{\"name\":f\"{jn}-artifacts\",\"path\":\"\\n\".join(arts[\"paths\"])}})\n  job[\"steps\"]=steps\n  wf[\"jobs\"][jn]=job\nout_dir=root/\".github\"/\"workflows\"; out_dir.mkdir(parents=True,exist_ok=True)\nout_path=out_dir/\"ci-converted.yml\"\nyaml.safe_dump(wf,out_path.open(\"w\",encoding=\"utf-8\"),sort_keys=False)\nprint(f\"Wrote {out_path}\")'
+          python3 -c $'import sys,json\nfrom pathlib import Path\nimport yaml\nroot=Path(".")\nci_path=root/".gitlab-ci.yml"\nif not ci_path.exists():\n  print("No .gitlab-ci.yml",file=sys.stderr); sys.exit(0)\nci=yaml.safe_load(ci_path.read_text(encoding="utf-8")) or {}\nstages=ci.get("stages") or []\nglobals_=ci.get("variables") or {}\ndefaults=ci.get("default") or {}\nglobal_keys={"stages","variables","workflow","default","include","spec"}\njobs=[k for k,v in ci.items() if isinstance(v,dict) and k not in global_keys]\nstage_of={j:ci[j].get("stage",(stages[0] if stages else "build")) for j in jobs}\n\ndef needs_for(job):\n  s=stage_of[job]\n  if not stages or s not in stages: return []\n  idx=stages.index(s); prev=set(stages[:idx])\n  return [jn for jn in jobs if stage_of[jn] in prev]\n\nwf={\"name\":\"CI (converted)\",\"on\":{\"push\":{\"branches\":[\"**\"]},\"pull_request\":{\"branches\":[\"**\"]},\"workflow_dispatch\":{}},\"jobs\":{}}\nfor jn in jobs:\n  j=ci[jn]; job={}; job[\"runs-on\"]=\"ubuntu-latest\"\n  image=j.get(\"image\") or defaults.get(\"image\")\n  if image: job[\"container\"]=image\n  env={}; env.update(globals_); env.update(j.get(\"variables\") or {})\n  if env: job[\"env\"]=env\n  if j.get(\"allow_failure\"): job[\"continue-on-error\"]=True\n  n=needs_for(jn)\n  if n: job[\"needs\"]=n\n  services=j.get(\"services\")\n  if services and isinstance(services,list):\n    svc={}\n    for s in services:\n      if isinstance(s,str):\n        label=s.split(\"/\")[-1].split(\":\")[0].replace(\"-\",\"_\")\n        svc[label]={\"image\": s}\n    job[\"services\"]=svc\n  steps=[{\"uses\":\"actions/checkout@v4\"}]\n  for c in j.get(\"before_script\",[]): steps.append({\"name\":\"before\",\"run\":c})\n  for c in j.get(\"script\",[]):        steps.append({\"name\":\"run\",\"run\":c})\n  for c in j.get(\"after_script\",[]):  steps.append({\"name\":\"after\",\"run\":c})\n  cache=j.get(\"cache\")\n  if cache and isinstance(cache,dict) and cache.get(\"paths\"):\n    steps.insert(1,{\"name\":\"Cache\",\"uses\":\"actions/cache@v4\",\"with\":{\"path\":\"\\n\".join(cache[\"paths\"]),\"key\":\"${{ runner.os }}-cache-${{ hashFiles(\'**/*\') }}\",\"restore-keys\":\"${{ runner.os }}-cache-\"}})\n  arts=j.get(\"artifacts\")\n  if isinstance(arts,dict) and arts.get(\"paths\"):\n    steps.append({\"name\":\"Upload artifacts\",\"uses\":\"actions/upload-artifact@v4\",\"with\":{\"name\":f\"{jn}-artifacts\",\"path\":\"\\n\".join(arts[\"paths\"])}})\n  job[\"steps\"]=steps\n  wf[\"jobs\"][jn]=job\nout_dir=root/\".github\"/\"workflows\"; out_dir.mkdir(parents=True,exist_ok=True)\nout_path=out_dir/\"ci-converted.yml\"\nyaml.safe_dump(wf,out_path.open(\"w\",encoding=\"utf-8\"),sort_keys=False)\nprint(f\"Wrote {out_path}\")'
 
       - name: Create migration branch, commit & push
         if: steps.detect.outputs.found == 'true'
@@ -228,11 +228,11 @@ jobs:
             --body "Automated conversion of .gitlab-ci.yml to GitHub Actions workflows"
 
       - name: (Optional) Enable auto-merge
-               if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != '' && env.AUTO_MERGE == 'true'
+        if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != '' && env.AUTO_MERGE == 'true'
         working-directory: target
         env:
           GH_TOKEN: ${{ env.GH_TOKEN }}
-        shell: bash
+        shell        shell: bash
         run: |
           set -euo pipefail
           PRN=$(gh pr list --state open --json number,createdAt --jq 'sort_by(.createdAt) | reverse | .[0].number' || true)
