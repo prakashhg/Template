@@ -28,7 +28,7 @@ jobs:
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
-      GH_TOKEN: ${{ secrets.github.token }}
+      GH_TOKEN: ${{ github.token }}
 
       # Only from repository/environment variables (vars)
       VAR_GL_URL: ${{ vars.GL_URL }}
