@@ -27,6 +27,9 @@ jobs:
       VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
       VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
       VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
+      
+    outputs:
+      pr_url: ${{ steps.migrate.outputs.pr_url }}
     
     steps:
       - name: Install tools
@@ -38,14 +41,6 @@ jobs:
           gh --version
           gh auth status || true
           gh extension install github/gh-actions-importer
-
-    outputs:
-      pr_url: ${{ steps.migrate.outputs.pr_url }}
-
-    steps:
-      - name: "0.0) Verify tools & authenticate (Docker + gh)"
-        shell: bash
-        run: |
           set -euo pipefail
           # Ensure Docker & gh CLI are available on runner
           docker --version || { echo "❌ Docker not available"; exit 1; }
