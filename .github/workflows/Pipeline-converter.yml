@@ -50,15 +50,9 @@ jobs:
             exit 1
           fi
 
-          # Generate JSON array from repos.txt via a tiny inline Python script
-          REPOS_JSON="$(python3 - "$FILE" <<'PY'
-import json, sys
-fp = sys.argv[1]
-with open(fp, 'r', encoding='utf-8') as f:
-    data = [line.strip() for line in f if line.strip()]
-print(json.dumps(data))
-PY
-)"
+          # Generate JSON array from repos.txt using python -c (no here-doc / HTML escapes)
+          REPOS_JSON="$(python3 -c 'import json,sys; fp=sys.argv[1]; print(json.dumps([l.strip() for l in open(fp,"r",encoding="utf-8") if l.strip()]))' "$FILE")"
+
           # Expose the value to later jobs via step output
           echo "repos_json=${REPOS_JSON}" >> "$GITHUB_OUTPUT"
 
@@ -343,6 +337,6 @@ PY
         shell: bash
         run: |
           set -euo pipefail
-          PRN=$(gh pr list --state open --json number,createdAt --jq 'sort_by(.createdAt) | reverse          PRN=$(gh pr list --state open --json number,createdAt --jq 'sort_by(.createdAt) | reverse | .[0].number' || true)
-          if [ -n "${PRN:-}" ]; then
+          PRN=$(gh pr list --state open --json number,createdAt --jq 'sort_by(.createdAt) | reverse | .[0].number' || true)
+          if [ -n "${PRN:-}" ]; then          if [ -n "${PRN:-}" ]; then
             gh pr merge "${PRN}" --auto --squash --delete-branch || true
