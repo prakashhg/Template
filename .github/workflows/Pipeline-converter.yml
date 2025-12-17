@@ -1,0 +1,65 @@
+
+name: Move GitLab CI file to GitHub Workflows
+
+on:
+  # Run manually when you're ready
+  workflow_dispatch:
+
+permissions:
+  contents: write     # needed to push changes
+  pull-requests: write
+
+jobs:
+  move-gitlab-ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Ensure we can push back to the same branch
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Identify and move .gitlab-ci file
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "🔎 Looking for .gitlab-ci.yml or .gitlab-ci.yaml at repo root..."
+          candidate=""
+          if [[ -f ".gitlab-ci.yml" ]]; then
+            candidate=".gitlab-ci.yml"
+          elif [[ -f ".gitlab-ci.yaml" ]]; then
+            candidate=".gitlab-ci.yaml"
+          fi
+
+          if [[ -z "${candidate}" ]]; then
+            echo "❌ No .gitlab-ci.yml or .gitlab-ci.yaml found. Exiting without changes."
+            exit 0
+          fi
+
+          echo "✅ Found ${candidate}"
+          mkdir -p .github/workflows
+
+          # Move and rename so GitHub won't try to run it as a valid Actions workflow yet
+          target=".github/workflows/gitlab-pipeline-legacy.yml"
+          mv "${candidate}" "${target}"
+          echo "✅ Moved ${candidate} → ${target}"
+          echo "ℹ️ This file remains in GitLab CI syntax and will be converted later."
+
+      - name: Commit & push changes
+        if: success()
+        shell: bash
+        run: |
+          # Only commit if there are changes
+          if [[ -n "$(git status --porcelain)" ]]; then
+            branch="$(git rev-parse --abbrev-ref HEAD)"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .github/workflows/gitlab-pipeline-legacy.yml
+            git commit -m "Move .gitlab-ci to .github/workflows for later conversion"
+            git push origin "${branch}"
+            echo "✅ Changes pushed to ${branch}"
+          else
+                       echo "ℹ️ No changes to commit."
