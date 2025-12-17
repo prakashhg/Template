@@ -1,25 +1,26 @@
 
-name: Migrate GitLab CI to GitHub Actions
+name: Convert GitLab CI to GitHub Actions
 
 on:
   workflow_dispatch:
     inputs:
       commit_result:
-        description: "Commit converted workflow to repo"
+        description: "Commit converted workflow(s) back to the repo"
         required: true
         default: "true"
 
 jobs:
-  migrate:
+  convert:
     runs-on: ubuntu-latest
 
-    # Needed for committing/pushing the generated workflows
+    # Needed if we push changes
     permissions:
       contents: write
 
-    # Make GH_TOKEN available to all steps that use gh
+    # gh requires GH_TOKEN in env on Actions runners
+    # (gh is preinstalled on ubuntu-latest)
     env:
-      GH_TOKEN: ${{ github.token }} # or set to ${{ secrets.GH_PAT }} if you must use a PAT
+      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout repository
@@ -27,49 +28,44 @@ jobs:
         with:
           fetch-depth: 0
 
-      # gh is preinstalled on GitHub-hosted runners; this verifies auth and installs the extension
-      - name: Install GitHub Actions Importer extension
+      - name: Verify .gitlab-ci.yml exists
+        run: |
+          if [ ! -f ".gitlab-ci.yml" ]; then
+            echo "❌ .gitlab-ci.yml not found at the repo root."
+            exit 1
+          fi
+          echo "✅ Found .gitlab-ci.yml"
+
+      - name: Install GitHub Actions Importer CLI extension
         run: |
           gh --version
           gh auth status || true
           gh extension install github/gh-actions-importer
           gh actions-importer version
 
-      - name: Verify GitLab CI file exists
-        run: |
-          if [ ! -f ".gitlab-ci.yml" ]; then
-            echo "❌ .gitlab-ci.yml not found"
-            exit 1
-          fi
-          echo "✅ Found .gitlab-ci.yml"
-
       - name: Convert GitLab CI to GitHub Actions
-        env:
-          # GH_TOKEN comes from job env above
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_HOST: ${{ secrets.GITLAB_HOST }} # e.g., gitlab.example.com
+        # If your GitLab config references remote includes or requires API calls,
+        # set GITLAB_TOKEN/GITLAB_HOST as env vars and pass --gitlab-* flags.
         run: |
+          mkdir -p .github/workflows
           gh actions-importer migrate gitlab \
             --input .gitlab-ci.yml \
-            --output .github/workflows \
-            --gitlab-access-token "${GITLAB_TOKEN}" \
-            --gitlab-server-url "https://${GITLAB_HOST}"
+            --output .github/workflows
 
-      - name: List converted workflows
+      - name: Show generated workflows
         run: |
-          echo "Generated workflows:"
+          echo "Generated workflows under .github/workflows:"
           ls -la .github/workflows || true
 
-      - name: Commit converted workflow
+      - name: Commit converted workflows
         if: ${{ inputs.commit_result == 'true' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add .github/workflows || true
+                   git add .github/workflows || true
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "chore: migrate GitLab CI to GitHub Actions"
+            git commit -m "chore: convert GitLab CI to GitHub Actions via Importer"
             git push
-         
