@@ -1,6 +1,4 @@
-
 name: Setup GitHub Actions Importer
-
 on:
   workflow_dispatch:
 
