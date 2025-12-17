@@ -40,7 +40,5 @@ jobs:
           gh auth status || true
           gh extension install github/gh-actions-importer
           set -euo pipefail
-          docker --version || { echo "❌ Docker not available"; exit 1; }
-          gh --version || { echo "❌ gh CLI not available"; exit 1; }
-          [[ -n "${GH_PAT:-}" ]] || { echo "❌ Missing GH_PAT secret (needs 'workflow' + 'repo' scopes)"; exit 1; }
-          echo "${GH_PAT}" | gh auth login --with-token
+          docker --version
+          gh --version 
