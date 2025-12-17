@@ -6,7 +6,7 @@ on:
 
 jobs:
   repo_migration_commit_sync:
-    name: "1) Pipeline-migrations"
+    name: "1) Repo Migration · 1.1 Pipeline migration"
     runs-on: ubuntu-latest
     outputs:
       gl_url: ${{ steps.export.outputs.gl_url }}
