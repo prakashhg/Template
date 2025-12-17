@@ -1,109 +1,229 @@
-name: Mirroring (GitLab → GitHub) + Trackers migration [Production]
+
+name: Convert GitLab CI (owner-wide)
 
 on:
-  push:
-  delete:
-  workflow_dispatch: {}    # no inputs - you trigger it manually if needed
+  workflow_dispatch:
+    inputs:
+      gh_owner:
+        description: "GitHub owner (user/org) to scan for repos"
+        required: true
+        default: "prakashhgworking"
+      repo_filter:
+        description: "Optional substring to filter repositories (e.g., 'service-')"
+        required: false
+        default: ""
+      include_archived:
+        description: "Include archived repos (true/false)"
+        required: true
+        default: "false"
+      commit_and_pr:
+        description: "Create branch, commit, push & open PR (true/false)"
+        required: true
+        default: "true"
+      max_parallel:
+        description: "Max parallel repos to process"
+        required: true
+        default: "4"
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+  contents: write         # to push branches/commits
+  pull-requests: write    # to open PRs
 
 jobs:
-  # 1) Repo Migration · 1.1 Commit Sync
-  repo_migration_commit_sync:
-    name: "1) Repo Migration · 1.1 Commit Sync"
+  discover_repos:
     runs-on: ubuntu-latest
-
-    outputs:
-      gl_url: ${{ steps.export.outputs.gl_url }}
-      gl_project: ${{ steps.export.outputs.gl_project }}
-      gh_owner: ${{ steps.export.outputs.gh_owner }}
-      gh_repo: ${{ steps.export.outputs.gh_repo }}
-      auto_create: ${{ steps.export.outputs.auto_create }}
-      delete_first: ${{ steps.export.outputs.delete_first }}
-      migrate_mrs: ${{ steps.export.outputs.migrate_mrs }}
-
     env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT: ${{ secrets.GH_PAT }}
-
-      # Only from repository/environment variables (vars)
-      VAR_GL_URL: ${{ vars.GL_URL }}
-      VAR_GL_PROJECT: ${{ vars.GL_PROJECT }}
-      VAR_GH_OWNER: ${{ vars.GH_OWNER }}
-      VAR_GH_REPO: ${{ vars.GH_REPO }}
-      VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
-      VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
-      VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
-
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+    outputs:
+      repo_list: ${{ steps.collect.outputs.repo_list }}
     steps:
-      - name: Show repository context
+      - name: Install jq & gh
         run: |
-          echo "Repo : $GITHUB_REPOSITORY"
-          echo "Ref  : $GITHUB_REF"
-          echo "SHA  : $GITHUB_SHA"
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          gh --version
+          gh auth status || true
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Locate .gitlab-ci file(s)
-        id: locate
+      - name: Collect repositories under owner
+        id: collect
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t FILES < <(find . -type f \( \
-              -name ".gitlab-ci.yml" -o \
-              -name ".gitlab-ci.yaml" -o \
-              -name ".gitlab-ci" \
-            \) -print)
+          OWNER="${{ inputs.gh_owner }}"
+          FILTER="${{ inputs.repo_filter }}"
+          INCLUDE_ARCH="${{ inputs.include_archived }}"
 
-          if [ "${#FILES[@]}" -eq 0 ]; then
-            echo "❌ No .gitlab-ci file found anywhere in the repository."
-            echo "Searched: .gitlab-ci.yml, .gitlab-ci.yaml, .gitlab-ci"
-            exit 1
+          # paginate through repos for the owner (public+private+internal where token has access)
+          page=1
+          TMP=$(mktemp)
+          : > "$TMP"
+          while true; do
+            # Visibility & type filters can be extended if needed
+            RESP=$(gh api -H "Accept: application/vnd.github+json" \
+              "/users/${OWNER}/repos?per_page=100&page=${page}" 2>/dev/null || true)
+
+            # If no results, break
+            if [ -z "$RESP" ] || [ "$(echo "$RESP" | jq 'length')" -eq 0 ]; then
+              break
+            fi
+
+            # Append name + archived flag
+            echo "$RESP" | jq -r '.[] | [.name, .archived] | @tsv' >> "$TMP"
+            page=$((page+1))
+          done
+
+          # Also try organization endpoint (in case OWNER is an org)
+          if [ ! -s "$TMP" ]; then
+            page=1
+            while true; do
+              RESP=$(gh api -H "Accept: application/vnd.github+json" \
+                "/orgs/${OWNER}/repos?per_page=100&page=${page}" 2>/dev/null || true)
+              if [ -z "$RESP" ] || [ "$(echo "$RESP" | jq 'length')" -eq 0 ]; then
+                break
+              fi
+              echo "$RESP" | jq -r '.[] | [.name, .archived] | @tsv' >> "$TMP"
+              page=$((page+1))
+            done
           fi
 
-          echo "✅ Found ${#FILES[@]} GitLab CI file(s):"
-          for f in "${FILES[@]}"; do echo " - ${f}"; done
+          if [ ! -s "$TMP" ]; then
+            echo "No repositories found for owner '${OWNER}'."
+            echo "repo_list=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-          # Prefer root-level file if present; else first match
-          pick() { [ -f "$1" ] && echo "$1"; }
-          PREFERRED="$(pick ./.gitlab-ci.yml || pick ./.gitlab-ci.yaml || pick ./.gitlab-ci || echo "")"
-          if [ -z "$PREFERRED" ]; then PREFERRED="${FILES[0]}"; fi
-          echo "Using pipeline file: $PREFERRED"
-          echo "pipeline_path=$PREFERRED" >> "$GITHUB_OUTPUT"
+          # Filter archived if requested, and by substring if provided
+          MAP=$(mktemp)
+          : > "$MAP"
+          while IFS=$'\t' read -r NAME ARCH; do
+            [ "${{ inputs.include_archived }}" = "true" ] || { [ "$ARCH" = "true" ] && continue; }
+            if [ -n "$FILTER" ] && [[ "$NAME" != *"$FILTER"* ]]; then
+              continue
+            fi
+            echo "$NAME"
+          done < "$TMP" > "$MAP"
 
-      - name: Install GitHub Actions Importer CLI extension
+          if [ ! -s "$MAP" ]; then
+            echo "Filter left no repositories to process."
+            echo "repo_list=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Build a JSON array of "owner/repo" strings for matrix
+          jq -Rn --arg owner "$OWNER" '[inputs | select(length>0) | ($owner + "/" + .)]' < "$MAP" \
+            | jq -c . \
+            | tee /dev/stderr \
+            | awk '{ print "repo_list="$0 }' >> "$GITHUB_OUTPUT"
+
+  convert_repos:
+    needs: discover_repos
+    if: ${{ needs.discover_repos.outputs.repo_list != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix:
+        target: ${{ fromJson(needs.discover_repos.outputs.repo_list) }}
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+      # If your .gitlab-ci includes remote GitLab templates, provide:
+      # GITLAB_HOST: ${{ secrets.GITLAB_HOST }}        # e.g., https://gitlab.com
+      # GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}      # PAT with read_repository/api
+
+    steps:
+      - name: Install gh & Importer
         run: |
           gh --version
           gh auth status || true
           gh extension install github/gh-actions-importer
           gh actions-importer version
 
-      - name: Convert GitLab CI to GitHub Actions
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.target }}
+          path: target-repo
+          fetch-depth: 0
+
+      - name: Locate .gitlab-ci file(s)
+        id: locate
+        shell: bash
+        working-directory: target-repo
         run: |
+          set -euo pipefail
+          mapfile -t FILES < <(find . -type f \( \
+              -name ".gitlab-ci.yml"  -o \
+              -name ".gitlab-ci.yaml" -o \
+              -name ".gitlab-ci" \
+            \) -print)
+
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "No GitLab CI file found in ${{ matrix.target }}."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Found ${#FILES[@]} GitLab CI file(s) in ${{ matrix.target }}:"
+          printf ' - %s\n' "${FILES[@]}"
+
+          # Prefer root-level file if present; otherwise first match
+          pick() { [ -f "$1" ] && echo "$1"; }
+          PREFERRED="$(pick ./.gitlab-ci.yml || pick ./.gitlab-ci.yaml || pick ./.gitlab-ci || echo "")"
+          if [ -z "$PREFERRED" ]; then PREFERRED="${FILES[0]}"; fi
+
+          echo "Using pipeline file: $PREFERRED"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "pipeline_path=$PREFERRED" >> "$GITHUB_OUTPUT"
+
+      - name: Convert GitLab CI → GitHub Actions
+        if: ${{ steps.locate.outputs.found == 'true' }}
+        shell: bash
+        working-directory: target-repo
+        run: |
+          set -euo pipefail
           mkdir -p .github/workflows
+          EXTRA=()
+          if [ -n "${GITLAB_HOST:-}" ] && [ -n "${GITLAB_TOKEN:-}" ]; then
+            EXTRA+=(--gitlab-server-url "${GITLAB_HOST}")
+            EXTRA+=(--gitlab-access-token "${GITLAB_TOKEN}")
+          fi
           gh actions-importer migrate gitlab \
             --input "${{ steps.locate.outputs.pipeline_path }}" \
-            --output .github/workflows
+            --output .github/workflows \
+            "${EXTRA[@]}"
 
-      - name: Show generated workflows
+      - name: Create branch and commit
+        if: ${{ steps.locate.outputs.found == 'true' && inputs.commit_and_pr == 'true' }}
+        shell: bash
+        working-directory: target-repo
         run: |
-          echo "Generated workflows under .github/workflows:"
-          ls -la .github/workflows || true
-
-      - name: Commit converted workflows
-        if: ${{ inputs.commit_result == 'true' }}
-        run: |
-          git config user.name "github-actions[bot]"
+          set -euo pipefail
+          BRANCH="chore/ga-migration-$(date +%Y%m%d%H%M%S)"
+          git switch -c "$BRANCH"
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .github/workflows || true
           if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "chore: convert GitLab CI to GitHub Actions via Importer"
-            git push
+            echo "No changes to commit in ${{ matrix.target }}."
+            exit 0
+          fi
+          git commit -m "chore: migrate GitLab CI to GitHub Actions via Importer"
+          git push -u origin "$BRANCH"
+
+      - name: Open Pull Request
+        if: ${{ steps.locate.outputs.found == 'true' && inputs.commit_and_pr == 'true' }}
+        shell: bash
+        working-directory: target-repo
+        run: |
+          set -euo pipefail
+          DEFAULT=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+          TITLE="Migrate GitLab CI to GitHub Actions"
+          BODY="This PR adds GitHub Actions workflows converted from the existing GitLab CI configuration using \`gh actions-importer\`."
+          gh pr create --base "$DEFAULT" --title "$TITLE" --body "$BODY" || {
+            echo "PR creation failed (possibly PR already exists)."
+          }
