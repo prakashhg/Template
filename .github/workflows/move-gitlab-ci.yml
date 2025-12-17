@@ -1,12 +1,12 @@
 
-name: Test Workflow
+name: Convert GitLab CI to GitHub Actions
 
 on:
-  workflow_dispatch:    # Allows manual trigger from Actions tab
-  push:                 # Also runs on any push
+  workflow_dispatch:
 
 jobs:
-  hello-world:
+  convert:
     runs-on: ubuntu-latest
-       steps:
-      - name: Print greeting
+    steps:
+      - name: Hello
+        run: echo "This minimal workflow parses and runs."
