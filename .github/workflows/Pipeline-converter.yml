@@ -50,7 +50,7 @@ jobs:
             exit 1
           fi
 
-          # Generate JSON array from repos.txt (YAML-safe: no here-doc)
+          # YAML-safe: no here-doc, no multi-line quotes
           REPOS_JSON="$(python3 -c 'import json,sys; fp=sys.argv[1]; print(json.dumps([l.strip() for l in open(fp,"r",encoding="utf-8") if l.strip()]))' "$FILE")"
           echo "repos_json=${REPOS_JSON}" >> "$GITHUB_OUTPUT"
 
@@ -64,15 +64,15 @@ jobs:
       matrix:
         repo: ${{ fromJson(needs.fanout.outputs.repos_json) }}
     env:
-      # Your secrets:
+      # Your secrets
       GH_TOKEN:            ${{ secrets.GH_TOKEN }}
       GITLAB_TOKEN:        ${{ secrets.GITLAB_TOKEN }}
 
-      # Variables expected by the Importer & gh CLI:
-      GITHUB_ACCESS_TOKEN: ${{ secrets.GH_TOKEN }}        # Importer needs this
-      GITLAB_ACCESS_TOKEN: ${{ secrets.GITLAB_TOKEN }}    # Importer needs this
+      # Variables expected by Importer & gh
+      GITHUB_ACCESS_TOKEN: ${{ secrets.GH_TOKEN }}
+      GITLAB_ACCESS_TOKEN: ${{ secrets.GITLAB_TOKEN }}
 
-      # Inputs:
+      # Inputs
       GITLAB_SERVER_URL:   ${{ github.event.inputs.gitlab_server_url }}
       BASE_BRANCH:         ${{ github.event.inputs.base_branch }}
       AUTO_MERGE:          ${{ github.event.inputs.auto_merge }}
@@ -97,14 +97,14 @@ jobs:
           gh extension install github/gh-actions-importer || true
           gh actions-importer update
 
-      - name: Configure Importer credentials (no here-doc)
+      - name: Configure Importer credentials (safe write)
         shell: bash
         run: |
           set -euo pipefail
           printf 'GITHUB_ACCESS_TOKEN=%s\nGITLAB_ACCESS_TOKEN=%s\nGITLAB_SERVER_URL=%s\n' \
             "${GITHUB_ACCESS_TOKEN}" "${GITLAB_ACCESS_TOKEN}" "${GITLAB_SERVER_URL}" > .env.local
 
-      - name: Importer — AUDIT (plan migration footprint)
+      - name: Importer — AUDIT
         if: github.event.inputs.mode == 'importer-audit'
         shell: bash
         run: |
@@ -112,7 +112,7 @@ jobs:
           gh actions-importer audit gitlab \
             --output "audit-${{ matrix.repo }}.json"
 
-      - name: Importer — DRY-RUN (generate workflows without PR)
+      - name: Importer — DRY-RUN
         if: github.event.inputs.mode == 'importer-dry-run'
         shell: bash
         run: |
@@ -130,7 +130,7 @@ jobs:
             --target-repo "${{ matrix.repo }}" \
             --base-branch "${BASE_BRANCH}"
 
-      - name: (Optional) Enable auto-merge on created PR
+      - name: (Optional) Enable auto-merge
         if: github.event.inputs.mode == 'importer-migrate' && env.AUTO_MERGE == 'true'
         shell: bash
         run: |
@@ -180,109 +180,21 @@ jobs:
         shell: bash
         run: echo "No .gitlab-ci.yml in ${{ matrix.repo }}, skipping."
 
-      - name: Convert GitLab CI ➜ GitHub Actions (no temporary script)
+      - name: Install PyYAML
         if: steps.detect.outputs.found == 'true'
         working-directory: target
         shell: bash
         run: |
           set -euo pipefail
-          python3 -c '
-import sys, json
-from pathlib import Path
-try:
-    import yaml
-except ImportError:
-    print("PyYAML is required on runner", file=sys.stderr); sys.exit(1)
+          python3 -m pip install --user PyYAML
 
-root = Path(".")
-ci_path = root / ".gitlab-ci.yml"
-if not ci_path.exists():
-    print("No .gitlab-ci.yml", file=sys.stderr); sys.exit(0)
-
-ci = yaml.safe_load(ci_path.read_text(encoding="utf-8")) or {}
-
-stages = ci.get("stages") or []
-globals_ = ci.get("variables") or {}
-defaults = ci.get("default") or {}
-global_keys = {"stages","variables","workflow","default","include","spec"}
-
-jobs = [k for k,v in ci.items() if isinstance(v,dict) and k not in global_keys]
-stage_of = { j: ci[j].get("stage", (stages[0] if stages else "build")) for j in jobs }
-
-def needs_for(job):
-    s = stage_of[job]
-    if not stages or s not in stages: return []
-    idx = stages.index(s)
-    prev = set(stages[:idx])
-    return [jn for jn in jobs if stage_of[jn] in prev]
-
-wf = {
-    "name": "CI (converted)",
-    "on": {
-        "push": {"branches": ["**"]},
-        "pull_request": {"branches": ["**"]},
-        "workflow_dispatch": {}
-    },
-    "jobs": {}
-}
-
-for jn in jobs:
-    j = ci[jn]
-    job = {}
-    job["runs-on"] = "ubuntu-latest"
-
-    image = j.get("image") or defaults.get("image")
-    if image: job["container"] = image
-
-    env = {}
-    env.update(globals_)
-    env.update(j.get("variables") or {})
-    if env: job["env"] = env
-
-    if j.get("allow_failure"): job["continue-on-error"] = True
-
-    n = needs_for(jn)
-    if n: job["needs"] = n
-
-    services = j.get("services")
-    if services and isinstance(services, list):
-        svc = {}
-        for s in services:
-            if isinstance(s, str):
-                label = s.split("/")[-1].split(":")[0].replace("-","_")
-                svc[label] = {"image": s}
-        job["services"] = svc
-
-    steps = [{"uses":"actions/checkout@v4"}]
-    for c in j.get("before_script", []): steps.append({"name":"before","run":c})
-    for c in j.get("script", []):        steps.append({"name":"run","run":c})
-    for c in j.get("after_script", []):  steps.append({"name":"after","run":c})
-
-    cache = j.get("cache")
-    if cache and isinstance(cache, dict) and cache.get("paths"):
-        steps.insert(1,{
-            "name":"Cache","uses":"actions/cache@v4",
-            "with":{"path":"\n".join(cache["paths"]),
-                    "key":"${{ runner.os }}-cache-${{ hashFiles(\'**/*\') }}",
-                    "restore-keys":"${{ runner.os }}-cache-"} })
-
-    arts = j.get("artifacts")
-    if isinstance(arts, dict) and arts.get("paths"):
-        steps.append({
-            "name":"Upload artifacts","uses":"actions/upload-artifact@v4",
-            "with":{"name":f"{jn}-artifacts","path":"\n".join(arts["paths"])} })
-
-    job["steps"] = steps
-    wf["jobs"][jn] = job
-
-out_dir = root / ".github" / "workflows"
-out_dir.mkdir(parents=True, exist_ok=True)
-out_path = out_dir / "ci-converted.yml"
-
-# Write YAML using PyYAML (keep order)
-yaml.safe_dump(wf, out_path.open("w", encoding="utf-8"), sort_keys=False)
-print(f"Wrote {out_path}")
-          '
+      - name: Convert GitLab CI ➜ GitHub Actions (ANSI-C quoting; no here-doc)
+        if: steps.detect.outputs.found == 'true'
+        working-directory: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c $'import sys,json\nfrom pathlib import Path\nimport yaml\nroot=Path(".")\nci_path=root/".gitlab-ci.yml"\nif not ci_path.exists():\n  print("No .gitlab-ci.yml",file=sys.stderr); sys.exit(0)\nci=yaml.safe_load(ci_path.read_text(encoding="utf-8")) or {}\nstages=ci.get("stages") or []\nglobals_=ci.get("variables") or {}\ndefaults=ci.get("default") or {}\nglobal_keys={"stages","variables","workflow","default","include","spec"}\njobs=[k for k,v in ci.items() if isinstance(v,dict) and k not in global_keys]\nstage_of={j:ci[j].get("stage",(stages[0] if stages else "build")) for j in jobs}\n\ndef needs_for(job):\n  s=stage_of[job]\n  if not stages or s not in stages: return []\n  idx=stages.index(s); prev=set(stages[:idx])\n  return [jn for jn in jobs if stage_of[jn] in prev]\n\nwf={\"name\":\"CI (converted)\",\"on\":{\"push\":{\"branches\":[\"**\"]},\"pull_request\":{\"branches\":[\"**\"]},\"workflow_dispatch\":{}},\"jobs\":{}}\nfor jn in jobs:\n  j=ci[jn]; job={}; job[\"runs-on\"]=\"ubuntu-latest\"\n  image=j.get(\"image\") or defaults.get(\"image\")\n  if image: job[\"container\"]=image\n  env={}; env.update(globals_); env.update(j.get(\"variables\") or {})\n  if env: job[\"env\"]=env\n  if j.get(\"allow_failure\"): job[\"continue-on-error\"]=True\n  n=needs_for(jn)\n  if n: job[\"needs\"]=n\n  services=j.get(\"services\")\n  if services and isinstance(services,list):\n    svc={}\n    for s in services:\n      if isinstance(s,str):\n        label=s.split(\"/\")[-1].split(\":\")[0].replace(\"-\",\"_\")\n        svc[label]={\"image\":s}\n    job[\"services\"]=svc\n  steps=[{\"uses\":\"actions/checkout@v4\"}]\n  for c in j.get(\"before_script\",[]): steps.append({\"name\":\"before\",\"run\":c})\n  for c in j.get(\"script\",[]):        steps.append({\"name\":\"run\",\"run\":c})\n  for c in j.get(\"after_script\",[]):  steps.append({\"name\":\"after\",\"run\":c})\n  cache=j.get(\"cache\")\n  if cache and isinstance(cache,dict) and cache.get(\"paths\"):\n    steps.insert(1,{\"name\":\"Cache\",\"uses\":\"actions/cache@v4\",\"with\":{\"path\":\"\\n\".join(cache[\"paths\"]),\"key\":\"${{ runner.os }}-cache-${{ hashFiles(\'**/*\') }}\",\"restore-keys\":\"${{ runner.os }}-cache-\"}})\n  arts=j.get(\"artifacts\")\n  if isinstance(arts,dict) and arts.get(\"paths\"):\n    steps.append({\"name\":\"Upload artifacts\",\"uses\":\"actions/upload-artifact@v4\",\"with\":{\"name\":f\"{jn}-artifacts\",\"path\":\"\\n\".join(arts[\"paths\"])}})\n  job[\"steps\"]=steps\n  wf[\"jobs\"][jn]=job\nout_dir=root/\".github\"/\"workflows\"; out_dir.mkdir(parents=True,exist_ok=True)\nout_path=out_dir/\"ci-converted.yml\"\nyaml.safe_dump(wf,out_path.open(\"w\",encoding=\"utf-8\"),sort_keys=False)\nprint(f\"Wrote {out_path}\")'
 
       - name: Create migration branch, commit & push
         if: steps.detect.outputs.found == 'true'
@@ -316,7 +228,7 @@ print(f"Wrote {out_path}")
             --body "Automated conversion of .gitlab-ci.yml to GitHub Actions workflows"
 
       - name: (Optional) Enable auto-merge
-        if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != '' && env.AUTO_MERGE == 'true'
+               if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != '' && env.AUTO_MERGE == 'true'
         working-directory: target
         env:
           GH_TOKEN: ${{ env.GH_TOKEN }}
@@ -325,4 +237,4 @@ print(f"Wrote {out_path}")
           set -euo pipefail
           PRN=$(gh pr list --state open --json number,createdAt --jq 'sort_by(.createdAt) | reverse | .[0].number' || true)
           if [ -n "${PRN:-}" ]; then
-            gh pr merge "${PRN}" --auto            gh pr merge "${PRN}" --auto --squash --delete-branch || true
+            gh pr merge "${PRN}" --auto --squash --delete-branch || true
