@@ -1,48 +1,33 @@
 
-name: Setup GitHub Actions Importer
+name: Convert GitLab CI to GitHub Actions Workflow (No gh CLI)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
-  repo_migration_commit_sync:
-    name: "1) Repo Migration · 1.1 Pipeline migration"
+  convert_gitlab_ci_to_github_actions:
     runs-on: ubuntu-latest
-    outputs:
-      gl_url: ${{ steps.export.outputs.gl_url }}
-      gl_project: ${{ steps.export.outputs.gl_project }}
-      gh_owner: ${{ steps.export.outputs.gh_owner }}
-      gh_repo: ${{ steps.export.outputs.gh_repo }}
-      auto_create: ${{ steps.export.outputs.auto_create }}
-      delete_first: ${{ steps.export.outputs.delete_first }}
-      migrate_mrs: ${{ steps.export.outputs.migrate_mrs }}
-      pr_url: ${{ steps.migrate.outputs.pr_url }}
-    
+
     env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT: ${{ secrets.GH_PAT }}
+      GH_PAT: ${{ secrets.GH_PAT }}           # Must include repo + workflow scopes
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}   # Optional for importer
       VAR_GL_URL: ${{ vars.GL_URL }}
       VAR_GL_PROJECT: ${{ vars.GL_PROJECT }}
       VAR_GH_OWNER: ${{ vars.GH_OWNER }}
       VAR_GH_REPO: ${{ vars.GH_REPO }}
-      VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
-      VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
-      VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
       GH_TOKEN: ${{ github.token }}
-    
+
     steps:
-      - name: Install tools with Docker
-        shell: bash
+      - name: "Step 1: Install tools"
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y jq curl git
-          gh auth status || true
-          gh extension install github/gh-actions-importer
-          set -euo pipefail
-          docker --version
-          gh --version 
-          echo "${GH_PAT}" | gh auth login --with-token
+          sudo apt-get install -y git curl jq
+          docker --version || { echo "❌ Docker not available"; exit 1; }
 
       - name: "Step 2: Clone GitHub repo using GH_PAT"
         run: |
