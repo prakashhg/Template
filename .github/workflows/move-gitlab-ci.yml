@@ -13,8 +13,13 @@ jobs:
   migrate:
     runs-on: ubuntu-latest
 
+    # Needed for committing/pushing the generated workflows
     permissions:
       contents: write
+
+    # Make GH_TOKEN available to all steps that use gh
+    env:
+      GH_TOKEN: ${{ github.token }} # or set to ${{ secrets.GH_PAT }} if you must use a PAT
 
     steps:
       - name: Checkout repository
@@ -22,17 +27,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      # gh is preinstalled on hosted runners; we only need to provide GH_TOKEN
-      # Reference: Using GitHub CLI in workflows
-      - name: Authenticate GitHub CLI
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }} # or use ${{ github.token }}
-        run: |
-          gh --version
-          gh auth status || echo "gh will use GH_TOKEN from env."
-
+      # gh is preinstalled on GitHub-hosted runners; this verifies auth and installs the extension
       - name: Install GitHub Actions Importer extension
         run: |
+          gh --version
+          gh auth status || true
           gh extension install github/gh-actions-importer
           gh actions-importer version
 
@@ -46,6 +45,7 @@ jobs:
 
       - name: Convert GitLab CI to GitHub Actions
         env:
+          # GH_TOKEN comes from job env above
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
           GITLAB_HOST: ${{ secrets.GITLAB_HOST }} # e.g., gitlab.example.com
         run: |
@@ -72,3 +72,4 @@ jobs:
           else
             git commit -m "chore: migrate GitLab CI to GitHub Actions"
             git push
+         
