@@ -63,12 +63,16 @@ jobs:
           echo "default_branch=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
           echo "✅ Repo exists. Default branch: ${DEFAULT_BRANCH}"
 
-      - name: "Step 2: Clone GitHub repo using GH_PAT"
+      - name: "Step 3: Clone repo using GH_PAT"
+        id: clone
+        shell: bash
         run: |
           set -euo pipefail
           WORKDIR="$(mktemp -d)"
           echo "WORKDIR=${WORKDIR}" >> "$GITHUB_ENV"
+
           REPO_URL="https://${GH_PAT}@github.com/${VAR_GH_OWNER}/${VAR_GH_REPO}.git"
           git clone "${REPO_URL}" "${WORKDIR}/repo"
           cd "${WORKDIR}/repo"
-          echo "✅ Repo cloned."
+          git checkout "${{ steps.check_repo.outputs.default_branch }}"
+          echo "✅ Repo cloned to ${WORKDIR}/repo"
