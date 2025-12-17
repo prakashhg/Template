@@ -84,7 +84,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker --version || (sudo apt-get update -y && sudo apt-get install -y docker.io && sudo systemctl start docker || true)
+          if ! docker --version >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y docker.io
+            sudo systemctl start docker || true
+          fi
+          docker --version
           gh --version || (echo "GitHub CLI not found" >&2; exit 1)
 
       - name: Install GH Actions Importer extension and update
@@ -329,13 +334,13 @@ PY
             --body "Automated conversion of .gitlab-ci.yml to GitHub Actions workflows"
 
       - name: (Optional) Enable auto-merge
-        if: steps.detect.outputs.found == '        if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != '' && env.AUTO_MERGE == 'true'
+        if: steps.detect.outputs.found == 'true' && steps.branch.outputs.branch != '' && env.AUTO_MERGE == 'true'
         working-directory: target
         env:
           GH_TOKEN: ${{ env.GH_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          PRN=$(gh pr list --state open --json number,createdAt --jq 'sort_by(.createdAt) | reverse | .[0].number' || true)
+          PRN=$(gh pr list --state open --json number,createdAt --jq 'sort          PRN=$(gh pr list --state open --json number,createdAt --jq 'sort_by(.createdAt) | reverse | .[0].number' || true)
           if [ -n "${PRN:-}" ]; then
             gh pr merge "${PRN}" --auto --squash --delete-branch || true
