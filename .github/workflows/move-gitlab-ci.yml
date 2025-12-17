@@ -1,20 +1,35 @@
-
-name: Setup GitHub Actions Importer
+name: Mirroring (GitLab → GitHub) + Trackers migration [Production]
 
 on:
-  workflow_dispatch:
+  push:
+  delete:
+  workflow_dispatch: {}    # no inputs - you trigger it manually if needed
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
+  # 1) Repo Migration · 1.1 Commit Sync
   repo_migration_commit_sync:
     name: "1) Repo Migration · 1.1 Commit Sync"
     runs-on: ubuntu-latest
 
-    # Make gh work in Actions (uses your PAT)
-    env:
-      GH_TOKEN: ${{ secrets.GH_PAT }}
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+    outputs:
+      gl_url: ${{ steps.export.outputs.gl_url }}
+      gl_project: ${{ steps.export.outputs.gl_project }}
+      gh_owner: ${{ steps.export.outputs.gh_owner }}
+      gh_repo: ${{ steps.export.outputs.gh_repo }}
+      auto_create: ${{ steps.export.outputs.auto_create }}
+      delete_first: ${{ steps.export.outputs.delete_first }}
+      migrate_mrs: ${{ steps.export.outputs.migrate_mrs }}
 
-      # Optional variables if you want to validate/export them
+    env:
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+
+      # Only from repository/environment variables (vars)
       VAR_GL_URL: ${{ vars.GL_URL }}
       VAR_GL_PROJECT: ${{ vars.GL_PROJECT }}
       VAR_GH_OWNER: ${{ vars.GH_OWNER }}
@@ -24,53 +39,15 @@ jobs:
       VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
 
     steps:
-      - name: Prepare variables (export env & outputs only)
-        id: prep
-        shell: bash
-        run: |
-          set -euo pipefail
-          GL_URL="${VAR_GL_URL:-https://gitlab.com}"
-          GL_PROJECT="${VAR_GL_PROJECT:-}"
-          GH_OWNER="${VAR_GH_OWNER:-}"
-          GH_REPO="${VAR_GH_REPO:-}"
-          AUTO_CREATE="${VAR_AUTO_CREATE:-true}"
-          DELETE_FIRST="${VAR_DELETE_FIRST:-false}"
-          MIGRATE_MRS="${VAR_MIGRATE_MRS:-true}"
-
-          [[ -z "${GL_PROJECT}" ]] && { echo "ERROR: GL_PROJECT required (vars)"; exit 1; }
-          [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]] && { echo "ERROR: GH_OWNER/GH_REPO required (vars)"; exit 1; }
-          [[ -z "${GL_TOKEN:-}" ]] && { echo "ERROR: Missing secret GITLAB_TOKEN"; exit 1; }
-          [[ -z "${GH_TOKEN:-}" ]] && { echo "ERROR: Missing GH_TOKEN (set secrets.GH_PAT or use github.token)"; exit 1; }
-
-          # ✅ Export ONLY KEY=VALUE lines to $GITHUB_ENV
-          {
-            echo "GL_URL=$GL_URL"
-            echo "GL_PROJECT=$GL_PROJECT"
-            echo "GH_OWNER=$GH_OWNER"
-            echo "GH_REPO=$GH_REPO"
-            echo "AUTO_CREATE=$AUTO_CREATE"
-            echo "DELETE_FIRST=$DELETE_FIRST"
-            echo "MIGRATE_MRS=$MIGRATE_MRS"
-            echo "WORKDIR=/tmp/mirror-work"
-          } >> "$GITHUB_ENV"
-
-          # Optional: expose as step outputs
-          {
-            echo "gl_url=$GL_URL"
-            echo "gl_project=$GL_PROJECT"
-            echo "gh_owner=$GH_OWNER"
-            echo "gh_repo=$GH_REPO"
-            echo "auto_create=$AUTO_CREATE"
-            echo "delete_first=$DELETE_FIRST"
-            echo "migrate_mrs=$MIGRATE_MRS"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Install tools & GitHub Actions Importer
+      - name: Install tools
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y jq curl git
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl git
           gh --version
-                   gh auth status || true
+          gh auth status || true
           gh extension install github/gh-actions-importer
