@@ -27,6 +27,7 @@ jobs:
       # Secrets
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT:   ${{ secrets.GH_PAT }}
+      GH_PAT: ${{ secrets.GH_PAT }}
 
       # Vars (your requested names)
       VAR_GL_URL:       ${{ vars.GL_URL }}
@@ -141,8 +142,7 @@ jobs:
         uses: ./.github/workflows/gitlab-ci-converter.yml
         with:
           source_path: ${{ steps.detect.outputs.gitlab_ci_path }}
-        secrets:
-          GH_PAT: ${{ secrets.GH_PAT }}
+
 
       - name: "Step 6: Commit & push converted workflow"
         shell: bash
