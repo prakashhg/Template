@@ -1,5 +1,5 @@
 
-name: Setup GitHub Actions Importer
+name: Setup GitHub Actions Importer (REST-only, no gh/no Docker)
 
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ jobs:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT:   ${{ secrets.GH_PAT }}
 
-      # Vars (exactly as you asked)
+      # Vars (your requested names)
       VAR_GL_URL:       ${{ vars.GL_URL }}
       VAR_GL_PROJECT:   ${{ vars.GL_PROJECT }}
       VAR_GH_OWNER:     ${{ vars.GH_OWNER }}
@@ -37,7 +37,7 @@ jobs:
       VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
       VAR_MIGRATE_MRS:  ${{ vars.MIGRATE_MRS }}
 
-      # Built-in token not used, but may be present
+      # Built-in token (not used, but present)
       GH_TOKEN: ${{ github.token }}
 
     steps:
@@ -91,7 +91,6 @@ jobs:
           set -euo pipefail
           REPO_API="https://api.github.com/repos/${VAR_GH_OWNER}/${VAR_GH_REPO}"
 
-          # Recommended headers per GitHub REST docs
           RESP="$(curl -s \
             -H "Authorization: Bearer ${GH_PAT}" \
             -H "Accept: application/vnd.github+json" \
@@ -107,10 +106,6 @@ jobs:
           [[ -n "${DEFAULT_BRANCH}" && "${DEFAULT_BRANCH}" != "null" ]] || DEFAULT_BRANCH="main"
           echo "default_branch=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
           echo "✅ Repo exists. Default branch: ${DEFAULT_BRANCH}"
-          # Docs: Repos & default_branch: GET /repos/{owner}/{repo}
-          # https://docs.github.com/en/rest/repos/repos#get-a-repository
-          # https://docs.github.com/en/rest/repos
-          # cite citations: turn14search42
 
       - name: "Step 3: Clone repo via GH_PAT"
         shell: bash
@@ -140,14 +135,61 @@ jobs:
             exit 0
           fi
 
-      - name: "Step 5: Convert .gitlab-ci.yml → GitHub Actions (best-effort, Python)"
-        if: ${{ steps.detect.outputs.gitlab_ci_path != '' }}
+      # ⬇️ Call the reusable converter workflow and receive output path
+      - name: "Step 5: Convert using reusable workflow"
+        id: convert
+        uses: ./.github/workflows/gitlab-ci-converter.yml
+        with:
+          source_path: ${{ steps.detect.outputs.gitlab_ci_path }}
+        secrets:
+          GH_PAT: ${{ secrets.GH_PAT }}
+
+      - name: "Step 6: Commit & push converted workflow"
         shell: bash
         run: |
           set -euo pipefail
-          SRC="${{ steps.detect.outputs.gitlab_ci_path }}"
-          OUT="${WORKDIR}/repo/.github/workflows/gitlab-pipeline-converted.yml"
-          mkdir -p "$(dirname "${OUT}")"
+          cd "${WORKDIR}/repo"
+          OUT="${{ steps.convert.outputs.converted_path }}"
+          [[ -f "${OUT}" ]] || { echo "❌ Converted file missing at ${OUT}"; exit 1; }
 
-          # Best-effort converter (no Docker, no gh). Preserves job names & scripts.
-          python3 - << 'PYCODE'
+          BRANCH="ci-migration-$(date +%s)"
+          git config user.name "actions-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add "${OUT}"
+          git commit -m "Add converted GitHub Actions workflow from .gitlab-ci.yml (best-effort)"
+          git push "https://${GH_PAT}@github.com/${VAR_GH_OWNER}/${VAR_GH_REPO}.git" "${BRANCH}"
+          echo "BRANCH=${BRANCH}" >> "$GITHUB_ENV"
+          echo "✅ Pushed branch ${BRANCH}"
+
+      - name: "Step 7: Open PR via GitHub REST API"
+        id: open_pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="${{ steps.check_repo.outputs.default_branch }}"
+          HEAD="${BRANCH}"
+          API="https://api.github.com/repos/${VAR_GH_OWNER}/${VAR_GH_REPO}/pulls"
+
+          DATA=$(jq -n \
+            --arg title "Convert .gitlab-ci.yml to GitHub Actions (best-effort)" \
+            --arg head  "${HEAD}" \
+            --arg base  "${BASE}" \
+            --arg body  "This PR adds a best-effort converted workflow from .gitlab-ci.yml.\n\n**Manual follow-up:**\n- Map rules/only/except to \`on:\`\n- Map services to service containers\n- Add \`actions/cache\` where needed\n- Validate with actionlint\n\nDocs:\n- Get repo & default branch: https://docs.github.com/en/rest/repos/repos#get-a-repository\n- Create PR: https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request" \
+            '{title:$title, head:$head, base:$base, body:$body}')
+
+          RESP="$(curl -s -X POST \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            "${API}" -d "${DATA}")"
+
+          PR_URL="$(echo "${RESP}" | jq -r '.html_url // empty')"
+          if [[ -z "${PR_URL}" ]]; then
+            echo "❌ Failed to create PR. Response:"
+            echo "${RESP}"
+                       exit 1
+          fi
+
+          echo "pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
