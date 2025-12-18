@@ -1,12 +1,16 @@
+
 name: Mirroring (GitLab → GitHub) + Trackers migration [Production]
+
 on:
   push:
   delete:
   workflow_dispatch: {} # no inputs - you trigger it manually if needed
+
 permissions:
   contents: write
   issues: write
   pull-requests: write
+
 jobs:
   # 1) Repo Migration · 1.1 Commit Sync
   repo_migration_commit_sync:
@@ -491,13 +495,53 @@ jobs:
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
-      - name: Install GitHub CLI & Importer extension
+      - name: Ensure GitHub CLI & Docker are available
+        shell: bash
         run: |
           set -euo pipefail
-          gh --version || (sudo apt-get update -y && sudo apt-get install -y gh)
-          gh extension install github/gh-actions-importer || true
-          gh extension upgrade github/gh-actions-importer || true
-          gh actions-importer update || true
+          # Install gh if missing
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y gnupg software-properties-common
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
+              sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
+              sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -y
+            sudo apt-get install -y gh
+          fi
+          sudo apt-get install -y jq curl
+
+          # Install Docker if missing (Importer uses a Docker container)
+          if ! command -v docker >/dev/null 2>&1; then
+            sudo apt-get install -y docker.io
+            sudo systemctl enable --now docker
+          fi
+
+          docker --version
+          gh --version
+
+      - name: Authenticate gh (for GHCR pulls)
+        shell: bash
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          echo "$GH_PAT" | gh auth login --with-token --hostname github.com
+          gh auth status
+
+      - name: Install Actions Importer extension and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Install if not present
+          if ! gh extension list | grep -q '^github/gh-actions-importer'; then
+            gh extension install github/gh-actions-importer
+          fi
+          # Verify subcommand and update container
+          gh actions-importer -h
+          gh actions-importer update
 
       - name: Compute destination repo name
         id: repo
@@ -545,5 +589,4 @@ jobs:
       - name: Upload converted workflow as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}
-          path: tmp/dry-run/${{ steps.repo.outputs.gh_repo }}
+          name:          name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}
