@@ -183,7 +183,7 @@ jobs:
           echo "Pushing tags..."
           git push --tags github
 
-  # 1) Repo Migration · 1.3 PR Sync (MR → PR)
+  # 1) Repo Migration · 1.3 PR Sync (MR → PR) (robust)
   repo_migration_pr_sync:
     name: "1) Repo Migration · 1.3 PR Sync (MR → PR)"
     needs: repo_migration_commit_sync
@@ -438,7 +438,7 @@ jobs:
             page="${next}"
           done
 
-  # 1) Repo Migration · 1.5 Milestone Sync
+  # 1) Repo Migration · 1.5 Milestone Sync (robust)
   repo_migration_milestone_sync:
     name: "1) Repo Migration · 1.5 Milestone Sync"
     needs: [repo_migration_commit_sync, repo_migration_label_sync]
@@ -468,7 +468,7 @@ jobs:
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
-      - name: Migrate milestones (GitLab → GitHub)
+      - name: Migrate milestones (GitLab → GitHub) — robust
         shell: bash
         run: |
           set -euo pipefail
@@ -477,37 +477,50 @@ jobs:
           : "${GH_OWNER:?GH_OWNER is empty}"
           : "${GH_REPO:?GH_REPO is empty}"
 
-          cat > milestones.sh <<'BASH'
-          set -euo pipefail
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/milestones?per_page=100&page=${page}" > "${RESP}"
 
-            jq -c '.[]' "${RESP}" | while read -r ms; do
+            # Fail fast on HTTP errors and keep body for diagnostics
+            if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/milestones?per_page=100&page=${page}" > "${RESP}"; then
+              echo "ERROR: GitLab Milestones API returned non-2xx for page ${page}."
+              echo "Headers:"; cat "${HDR}" || true
+              echo "Body (first 300 bytes):"; head -c 300 "${RESP}" || true
+              exit 1
+            fi
+
+            # Validate that the body is a JSON array
+            if [[ "$(jq -r 'type' "${RESP}" 2>/dev/null || echo 'unknown')" != "array" ]]; then
+              echo "WARN: Milestones API did not return a JSON array on page ${page}."
+              head -c 300 "${RESP}" || true
+              break
+            fi
+
+            # Iterate each milestone safely
+            jq -c '.[]' "${RESP}" | while IFS= read -r ms; do
               title=$(printf '%s' "${ms}" | jq -r '.title')
               description=$(printf '%s' "${ms}" | jq -r '.description // empty')
               due=$(printf '%s' "${ms}" | jq -r '.due_date // empty')
+
               payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg due "${due}" \
                 '{title:$title, description:$desc} + (((($due|length)>0)) ? {due_on:$due} : {})')
 
               status=$(curl -s -o /dev/null -w "%{http_code}" \
                 -H "Authorization: Bearer ${GH_PAT}" \
                 -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
                 -d "${payload}" \
                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
               echo "Milestone ${title} status: ${status}"
               sleep 1
             done
 
+            # Pagination
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
           done
-          BASH
-
-          bash milestones.sh
 
   # 1.6) Discover projects → provides project_list for matrix (filtered)
   discover_projects:
@@ -915,8 +928,7 @@ jobs:
 
           # Extract PR URL robustly (strip quotes/CRs)
           PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tr -d '"'\'' | tail -n1 || true)"
-          if [[ -n "${PR_URL}" ]]; then
+          if [[ -          if [[ -n "${PR_URL}" ]]; then
             echo "Migration complete. PR link: ${PR_URL}"
           else
             echo "Migration complete. Check the step log above for the PR URL."
-          fi
