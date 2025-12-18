@@ -226,18 +226,33 @@ jobs:
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/merge_requests?scope=all&per_page=100&page=${page}" > "${RESP}"
+            # Fail fast on HTTP errors, capture body for diagnostics
+            if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/merge_requests?scope=all&per_page=100&page=${page}" > "${RESP}"; then
+              echo "ERROR: GitLab API returned non-2xx. Headers:"
+              cat "${HDR}" || true
+              echo "Body (first 300 bytes):"
+              head -c 300 "${RESP}" || true
+              exit 1
+            fi
 
-            jq -c '.[]' "${RESP}" | while read -r mr; do
-              title=$(jq -r '.title' <<< "${mr}")
-              body=$(jq -r '.description // ""' <<< "${mr}")
-              state=$(jq -r '.state' <<< "${mr}")
-              labels=$(jq -c '.labels' <<< "${mr}")
-              source_branch=$(jq -r '.source_branch' <<< "${mr}")
-              target_branch=$(jq -r '.target_branch' <<< "${mr}")
-              author=$(jq -r '.author.username' <<< "${mr}")
-              gl_iid=$(jq -r '.iid' <<< "${mr}")
+            # Validate JSON type before iterating
+            if [[ "$(jq -r 'type' "${RESP}" 2>/dev/null || echo 'unknown')" != "array" ]]; then
+              echo "WARN: GitLab API did not return an array for merge_requests. Body preview:"
+              head -c 300 "${RESP}" || true
+              break
+            fi
+
+            # Iterate robustly; avoid <<< and use printf piping
+            jq -c '.[]' "${RESP}" | while IFS= read -r mr; do
+              title=$(printf '%s' "${mr}" | jq -r '.title')
+              body=$(printf '%s' "${mr}" | jq -r '.description // ""')
+              state=$(printf '%s' "${mr}" | jq -r '.state')
+              labels=$(printf '%s' "${mr}" | jq -c '.labels')
+              source_branch=$(printf '%s' "${mr}" | jq -r '.source_branch')
+              target_branch=$(printf '%s' "${mr}" | jq -r '.target_branch')
+              author=$(printf '%s' "${mr}" | jq -r '.author.username')
+              gl_iid=$(printf '%s' "${mr}" | jq -r '.iid')
 
               HEAD_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}"
               BASE_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}"
@@ -292,12 +307,22 @@ jobs:
               cpage=1
               while true; do
                 CRESP=$(mktemp) ; CHDR=$(mktemp)
-                curl -s -D "${CHDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-                  "${GL_API}/projects/${GL_ENC}/merge_requests/${gl_iid}/notes?activity_filter=only_comments&per_page=100&page=${cpage}" > "${CRESP}"
+                if ! curl --fail-with-body -s -D "${CHDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                  "${GL_API}/projects/${GL_ENC}/merge_requests/${gl_iid}/notes?activity_filter=only_comments&per_page=100&page=${cpage}" > "${CRESP}"; then
+                  echo "WARN: Comments API returned error for MR#${gl_iid} page ${cpage}."
+                  head -c 300 "${CRESP}" || true
+                  break
+                fi
 
-                jq -c '.[]' "${CRESP}" | while read -r note; do
-                  nbody=$(jq -r '.body' <<< "${note}")
-                  nauth=$(jq -r '.author.username' <<< "${note}")
+                if [[ "$(jq -r 'type' "${CRESP}" 2>/dev/null || echo 'unknown')" != "array" ]]; then
+                  echo "WARN: Comments API did not return an array for MR#${gl_iid}."
+                  head -c 300 "${CRESP}" || true
+                  break
+                fi
+
+                jq -c '.[]' "${CRESP}" | while IFS= read -r note; do
+                  nbody=$(printf '%s' "${note}" | jq -r '.body')
+                  nauth=$(printf '%s' "${note}" | jq -r '.author.username')
                   curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
                     -H "Accept: application/vnd.github+json" \
                     -d "$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')" \
@@ -361,9 +386,9 @@ jobs:
             curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${GL_ENC}/labels?per_page=100&page=${page}" > "${RESP}"
 
             jq -c '.[]' "${RESP}" | while read -r lbl; do
-              name=$(jq -r '.name' <<< "${lbl}")
-              color=$(jq -r '.color' <<< "${lbl}" | sed 's/^#//')
-              description=$(jq -r '.description // empty' <<< "${lbl}")
+              name=$(printf '%s' "${lbl}" | jq -r '.name')
+              color=$(printf '%s' "${lbl}" | jq -r '.color' | sed 's/^#//')
+              description=$(printf '%s' "${lbl}" | jq -r '.description // empty')
 
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
                 -H "Accept: application/vnd.github+json" \
@@ -435,9 +460,9 @@ jobs:
               "${GL_API}/projects/${GL_ENC}/milestones?per_page=100&page=${page}" > "${RESP}"
 
             jq -c '.[]' "${RESP}" | while read -r ms; do
-              title=$(jq -r '.title' <<< "${ms}")
-              description=$(jq -r '.description // empty' <<< "${ms}")
-              due=$(jq -r '.due_date // empty' <<< "${ms}")
+              title=$(printf '%s' "${ms}" | jq -r '.title')
+              description=$(printf '%s' "${ms}" | jq -r '.description // empty')
+              due=$(printf '%s' "${ms}" | jq -r '.due_date // empty')
               payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg due "${due}" \
                 '{title:$title, description:$desc} + (((($due|length)>0)) ? {due_on:$due} : {})')
 
@@ -468,7 +493,6 @@ jobs:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL: ${{ vars.GL_URL }}
       GL_GROUP: ${{ vars.GL_GROUP }}
-      # add naming context so we can filter deletion-scheduled repos before matrix
       REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
@@ -486,7 +510,6 @@ jobs:
           set -euo pipefail
           : "${GL_URL:?GL_URL is required}"
 
-          # Pull GL_PROJECT to derive default group
           GL_PROJECT="${{ vars.GL_PROJECT }}"
           DEFAULT_GROUP="${GL_PROJECT%/*}"
           GROUP_VAL="${GL_GROUP:-$DEFAULT_GROUP}"
@@ -510,23 +533,20 @@ jobs:
 
             while read -r proj; do
               path=$(jq -r '.path_with_namespace' <<< "${proj}")
-              [[ -z "${path}" ]] && continue
-              total=$((total+1))
-
-              # Compute would-be GH_REPO for filtering
-              if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
-                base="$(echo "${path}" | tr '/' "${GH_REPO_SEPARATOR}")"
-              else
-                base="${path##*/}"
-              fi
-              dest="${GH_REPO_PREFIX}${base}"
-
-              if [[ "${dest}" == *deletion_scheduled-* ]]; then
-                echo "Exclude (deletion-scheduled): ${dest} (from GL: ${path})"
-                continue
-              fi
-
-              filtered+=("${path}")
+              [[ -n "${path}" ]] && {
+                # Compute would-be GH_REPO for filtering
+                if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
+                  base="$(echo "${path}" | tr '/' "${GH_REPO_SEPARATOR}")"
+                else
+                  base="${path##*/}"
+                fi
+                dest="${GH_REPO_PREFIX}${base}"
+                if [[ "${dest}" == *deletion_scheduled-* ]]; then
+                  echo "Exclude (deletion-scheduled): ${dest} (from GL: ${path})"
+                else
+                  filtered+=("${path}")
+                fi
+              }
             done < <(jq -c '.[]' "${RESP}")
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
@@ -808,7 +828,7 @@ jobs:
             echo "Created https://github.com/${GH_OWNER}/${GH_REPO}"
           fi
 
-      # 🔧 NEW: Preflight to use the default branch only (no 'main' creation)
+      # 🔧 Preflight to use the default branch only (no 'main' creation)
       - name: Ensure default branch points to an existing branch
         shell: bash
         env:
@@ -835,11 +855,9 @@ jobs:
           CURRENT_DEFAULT="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')"
           FIRST_BRANCH="$(jq -r '.[0].name' <<< "${BR_LIST}")"
 
-          # Is CURRENT_DEFAULT among the existing branches?
           HAS_DEFAULT="$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")"
           if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
             echo "Updating default branch to '${FIRST_BRANCH}' (existing branch)."
-            # PATCH /repos/{owner}/{repo} with default_branch
             UPDATE_HTTP="$(curl -s -o /dev/null -w "%{http_code}" \
               -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
               -d "{\"default_branch\":\"${FIRST_BRANCH}\"}" \
@@ -872,6 +890,6 @@ jobs:
           # Extract PR URL robustly (strip quotes/CRs)
           PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tr -d '"'\'' | tail -n1 || true)"
           if [[ -n "${PR_URL}" ]]; then
-            echo "Migration complete. PR            echo "Migration complete. PR link: ${PR_URL}"
+            echo "Migration complete. PR link:            echo "Migration complete. PR link: ${PR_URL}"
           else
             echo "Migration complete. Check the step log above for the PR URL."
