@@ -32,7 +32,7 @@ jobs:
       VAR_GH_OWNER: ${{ vars.GH_OWNER }}
       VAR_GH_REPO: ${{ vars.GH_REPO }}
       VAR_AUTO_CREATE: ${{ vars.AUTO_CREATE_REPO }}
-      VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
+      VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }} # retained in outputs, but we no longer delete
       VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
     steps:
       - name: Install tools
@@ -52,7 +52,7 @@ jobs:
           GH_OWNER="${VAR_GH_OWNER:-}"
           GH_REPO="${VAR_GH_REPO:-}"
           AUTO_CREATE="${VAR_AUTO_CREATE:-true}"
-          DELETE_FIRST="${VAR_DELETE_FIRST:-false}"
+          DELETE_FIRST="${VAR_DELETE_FIRST:-false}" # ignored now
           MIGRATE_MRS="${VAR_MIGRATE_MRS:-true}"
 
           [[ -z "${GL_PROJECT}" ]] && echo "ERROR: GL_PROJECT required (vars)" && exit 1
@@ -85,19 +85,7 @@ jobs:
             echo "migrate_mrs=${MIGRATE_MRS}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Optionally delete destination repository (DANGER)
-        if: env.DELETE_FIRST == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          REPO_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-            -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-            "${REPO_URL}")
-          echo "Delete HTTP status: ${STATUS}"
-          if [[ "${STATUS}" != "204" && "${STATUS}" != "404" ]]; then
-            echo "ERROR: Delete failed (HTTP ${STATUS})."; exit 1
-          fi
+      # 🔒 Deletion disabled: we do NOT delete repos anymore
 
       - name: Create GitHub repo if missing
         if: env.AUTO_CREATE == 'true'
@@ -124,6 +112,8 @@ jobs:
             fi
           fi
           echo "GH repo ready: https://github.com/${GH_OWNER}/${GH_REPO}"
+          # Print example HEAD-ref endpoint
+          echo "HEAD-ref endpoint example: https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/main"
           sleep 1
 
       - name: Clone GitLab mirror (branches & commits)
@@ -221,6 +211,15 @@ jobs:
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
+      - name: Skip if destination repo is deletion-scheduled
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GH_REPO}" == *deletion_scheduled-* ]]; then
+            echo "Skipping repo marked for deletion: ${GH_OWNER}/${GH_REPO}"
+            exit 0
+          fi
+
       - name: Migrate merge requests → pull requests
         shell: bash
         run: |
@@ -246,10 +245,14 @@ jobs:
               author=$(jq -r '.author.username' <<< "${mr}")
               gl_iid=$(jq -r '.iid' <<< "${mr}")
 
-              HEAD_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}")
-              BASE_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}")
+              # HEAD/BASE check endpoints
+              HEAD_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}"
+              BASE_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}"
+              echo "Checking HEAD: ${HEAD_URL}"
+              echo "Checking BASE: ${BASE_URL}"
+
+              HEAD_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${HEAD_URL}")
+              BASE_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${BASE_URL}")
 
               if [[ "${HEAD_OK}" != "200" || "${BASE_OK}" != "200" ]]; then
                 echo "Skip MR#${gl_iid}: missing head/base (${source_branch}→${target_branch})"
@@ -352,6 +355,15 @@ jobs:
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
+      - name: Skip if destination repo is deletion-scheduled
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GH_REPO}" == *deletion_scheduled-* ]]; then
+            echo "Skipping repo marked for deletion: ${GH_OWNER}/${GH_REPO}"
+            exit 0
+          fi
+
       - name: Migrate labels (GitLab → GitHub)
         shell: bash
         run: |
@@ -421,6 +433,15 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
+
+      - name: Skip if destination repo is deletion-scheduled
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GH_REPO}" == *deletion_scheduled-* ]]; then
+            echo "Skipping repo marked for deletion: ${GH_OWNER}/${GH_REPO}"
+            exit 0
+          fi
 
       - name: Migrate milestones (GitLab → GitHub)
         shell: bash
@@ -595,6 +616,17 @@ jobs:
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
           echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
+      - name: Skip if destination repo is deletion-scheduled
+        shell: bash
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          if [[ "${GH_REPO}" == *deletion_scheduled-* ]]; then
+            echo "Skipping repo marked for deletion: ${GH_OWNER}/${GH_REPO}"
+            exit 0
+          fi
+
       - name: Configure importer via .env.local (non-interactive)
         shell: bash
         run: |
@@ -721,6 +753,17 @@ jobs:
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
           echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
+      - name: Skip if destination repo is deletion-scheduled
+        shell: bash
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          if [[ "${GH_REPO}" == *deletion_scheduled-* ]]; then
+            echo "Skipping repo marked for deletion: ${GH_OWNER}/${GH_REPO}"
+            exit 0
+          fi
+
       - name: Configure importer via .env.local
         shell: bash
         run: |
@@ -786,4 +829,5 @@ jobs:
           if [[ -n "${PR_URL}" ]]; then
             echo "Migration complete. PR link: ${PR_URL}"
           else
-            echo "Migration complete. Check the step            echo "Migration complete. Check the step log above for the PR URL."
+            echo "Migration complete. Check the step log above for the PR URL."
+          fi
