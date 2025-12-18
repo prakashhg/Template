@@ -156,8 +156,7 @@ jobs:
             echo "has_branches=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Clone GitLab --mirror and push to GitHub
-        if: steps.srcbranches.outputs.has_branches == 'true'
+      - name: Clone GitLab mirror (branches & commits)
         shell: bash
         run: |
           set -euo pipefail
@@ -167,11 +166,13 @@ jobs:
           SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${GL_PROJECT}.git"
           echo "Cloning --mirror from ${GL_URL}/${GL_PROJECT}"
           git clone --mirror "${SRC_URL}" src.git
-          echo "Local refs preview (first 10):"
           git -C src.git show-ref | head -n 10 || true
 
-          cd src.git
-          git remote -v
+      - name: Push mirror to GitHub (branches & commits)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${WORKDIR}/src.git"
           PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
           git remote remove github 2>/dev/null || true
           git remote add github "${PUSH_URL}"
