@@ -58,7 +58,7 @@ jobs:
           [[ -z "${GL_PROJECT}" ]] && echo "ERROR: GL_PROJECT required (vars)" && exit 1
           [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]] && echo "ERROR: GH_OWNER/GH_REPO required (vars)" && exit 1
           [[ -z "${GL_TOKEN:-}" ]] && echo "ERROR: Missing secret GITLAB_TOKEN" && exit 1
-          [[ -z "${GH_PAT:-}"  ]] && echo "ERROR: Missing secret GH_PAT (PAT classic with repo+workflow scopes)" && exit 1
+          [[ -z "${GH_PAT:-}"  ]] && echo "ERROR: Missing secret GH_PAT (classic PAT with repo+workflow scopes)" && exit 1
 
           {
             echo "GL_URL=${GL_URL}"
@@ -494,8 +494,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GH_PAT: ${{ secrets.GH_PAT }}
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
@@ -589,14 +589,6 @@ jobs:
             --output-dir "tmp/dry-run/${GH_REPO}"
           echo "Converted workflow files are in tmp/dry-run/${GH_REPO}"
 
-      - name: Debug dry-run output
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "PWD: $(pwd)"
-          ls -la "tmp/dry-run/${{ steps.repo.outputs.gh_repo }}" || true
-          find "tmp/dry-run/${{ steps.repo.outputs.gh_repo }}" -maxdepth 2 -type f -print || true
-
       - name: Upload converted workflow as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -607,10 +599,10 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
-  # 1.6) GitLab CI → GitHub Actions (migrate production: open PR)
+  # 1.6) GitLab CI → GitHub Actions (migrate: open PR)
   ci_migration_migrate:
     name: "1.6) ${{ matrix.project }} · GitLab CI → Actions (migrate)"
-    needs: [discover_projects, repo_migration_commit_sync]
+    needs: [discover_projects]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -621,7 +613,7 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      GH_PAT: ${{ secrets.GH_PAT }}                 # PAT classic with repo+workflow scopes
+      GH_PAT: ${{ secrets.GH_PAT }}                 # classic PAT with repo+workflow scopes
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL: ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
@@ -630,7 +622,7 @@ jobs:
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
-      - name: Ensure GitHub CLI & Docker
+      - name: Install gh & Docker
         shell: bash
         run: |
           set -euo pipefail
@@ -723,12 +715,12 @@ jobs:
             HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
             if [[ "${HTTP}" != "201" ]]; then
               echo "Failed to create repo ${GH_OWNER}/${GH_REPO} (HTTP ${HTTP}).";
-              echo "TIP: Make sure GH_PAT (classic) has 'repo' and 'workflow' scopes, and the user has rights in ${GH_OWNER}."; exit 1
+              echo "TIP: GH_PAT must be classic PAT with 'repo' and 'workflow' scopes."; exit 1
             fi
             echo "Created https://github.com/${GH_OWNER}/${GH_REPO}"
           fi
 
-      - name: Migrate pipeline → open PR adding workflow
+      - name: Migrate pipeline → open PR adding workflow (FIXED echo block)
         shell: bash
         env:
           GL_PROJECT: ${{ matrix.project }}
@@ -744,8 +736,9 @@ jobs:
             --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
             --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
 
-          PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tail -n1 || true)"
+          PR_URL="$(sed -nE "s/.*Pull request: '([^']+)'.*/\1/p" "${LOG_FILE}" | tail -n1 || true)"
           if [[ -n "${PR_URL}" ]]; then
-            echo "Migration complete. PR            echo "Migration complete. PR link: ${PR_URL}"
+            echo "Migration complete. PR link: ${PR_URL}"
           else
             echo "Migration complete. Check the step log above for the PR URL."
+          fi
