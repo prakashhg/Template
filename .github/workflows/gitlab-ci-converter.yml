@@ -58,7 +58,7 @@ jobs:
           [[ -z "${GL_PROJECT}" ]] && echo "ERROR: GL_PROJECT required (vars)" && exit 1
           [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]] && echo "ERROR: GH_OWNER/GH_REPO required (vars)" && exit 1
           [[ -z "${GL_TOKEN:-}" ]] && echo "ERROR: Missing secret GITLAB_TOKEN" && exit 1
-          [[ -z "${GH_PAT:-}"  ]] && echo "ERROR: Missing secret GH_PAT" && exit 1
+          [[ -z "${GH_PAT:-}"  ]] && echo "ERROR: Missing secret GH_PAT (PAT classic with repo+workflow scopes)" && exit 1
 
           {
             echo "GL_URL=${GL_URL}"
@@ -621,7 +621,7 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      GH_PAT: ${{ secrets.GH_PAT }}                 # classic PAT with 'workflow' scope
+      GH_PAT: ${{ secrets.GH_PAT }}                 # PAT classic with repo+workflow scopes
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL: ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
@@ -698,6 +698,36 @@ jobs:
           GITLAB_INSTANCE_URL=${GL_URL}
           EOF
 
+      - name: Ensure destination repo exists (create if missing)
+        shell: bash
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${API}")
+          if [[ "${STATUS}" == "200" ]]; then
+            echo "Repo ${GH_OWNER}/${GH_REPO} exists."
+          else
+            echo "Repo ${GH_OWNER}/${GH_REPO} not found (HTTP ${STATUS}); creating..."
+            MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
+            if [[ "${GH_OWNER}" == "${MY_LOGIN}" ]]; then
+              CREATE_URL="https://api.github.com/user/repos"
+            else
+              CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
+            fi
+            PAYLOAD=$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
+            RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
+                    -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
+                    -d "${PAYLOAD}" "${CREATE_URL}")
+            HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
+            if [[ "${HTTP}" != "201" ]]; then
+              echo "Failed to create repo ${GH_OWNER}/${GH_REPO} (HTTP ${HTTP}).";
+              echo "TIP: Make sure GH_PAT (classic) has 'repo' and 'workflow' scopes, and the user has rights in ${GH_OWNER}."; exit 1
+            fi
+            echo "Created https://github.com/${GH_OWNER}/${GH_REPO}"
+          fi
+
       - name: Migrate pipeline → open PR adding workflow
         shell: bash
         env:
@@ -707,7 +737,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "tmp/migrate/${GH_REPO}"
-          # Run migrate and capture output so we can display the PR URL if present
           LOG_FILE="$(mktemp)"
           gh actions-importer migrate gitlab \
             --target-url "https://github.com/${GH_OWNER}/${GH_REPO}" \
@@ -715,10 +744,8 @@ jobs:
             --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
             --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
 
-                   # Try to extract the PR URL from the tool's output
           PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tail -n1 || true)"
-
           if [[ -n "${PR_URL}" ]]; then
-            echo "Migration complete. PR link: ${PR_URL}"
+            echo "Migration complete. PR            echo "Migration complete. PR link: ${PR_URL}"
           else
             echo "Migration complete. Check the step log above for the PR URL."
