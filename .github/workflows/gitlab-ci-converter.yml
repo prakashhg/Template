@@ -495,53 +495,25 @@ jobs:
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
-      - name: Ensure GitHub CLI & Docker are available
+      - name: Ensure GitHub CLI is available (local only; no auth)
         shell: bash
         run: |
           set -euo pipefail
-          # Install gh if missing
           if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y gnupg software-properties-common
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
-              sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
-              sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
             sudo apt-get update -y
             sudo apt-get install -y gh
           fi
-          sudo apt-get install -y jq curl
+          gh --version || true
 
-          # Install Docker if missing (Importer uses a Docker container)
-          if ! command -v docker >/dev/null 2>&1; then
-            sudo apt-get install -y docker.io
-            sudo systemctl enable --now docker
-          fi
-
-          docker --version
-          gh --version
-
-      - name: Authenticate gh (for GHCR pulls)
-        shell: bash
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          echo "$GH_PAT" | gh auth login --with-token --hostname github.com
-          gh auth status
-
-      - name: Install Actions Importer extension and verify
+      - name: Install Actions Importer extension if missing (no login)
         shell: bash
         run: |
           set -euo pipefail
-          # Install if not present
+          # Only install if not present; avoids failing when GH API is slow.
           if ! gh extension list | grep -q '^github/gh-actions-importer'; then
-            gh extension install github/gh-actions-importer
+            gh extension install github/gh-actions-importer || true
           fi
-          # Verify subcommand and update container
-          gh actions-importer -h
-          gh actions-importer update
+          # Don't run 'gh auth login' here; we avoid any call to api.github.com.
 
       - name: Compute destination repo name
         id: repo
@@ -572,7 +544,42 @@ jobs:
           GITLAB_INSTANCE_URL=${GL_URL}
           EOF
 
+      # NEW: Probe GitLab default branch and presence of .gitlab-ci.yml
+      - name: Probe GitLab pipeline file
+        id: probe
+        shell: bash
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          PROJ_ENC=$(jq -rn --arg x "$GL_PROJECT" '$x|@uri')
+
+          # Get the project's default branch
+          DEF=$(curl -s -H "PRIVATE-TOKEN: $GL_TOKEN" \
+                "$GL_API/projects/$PROJ_ENC" | jq -r '.default_branch // empty')
+          echo "default_branch=$DEF" >> "$GITHUB_OUTPUT"
+          echo "Default branch: ${DEF:-<unknown>}"
+
+          if [[ -z "$DEF" ]]; then
+            echo "has_ci=false" >> "$GITHUB_OUTPUT"
+            echo "WARNING: Could not determine default branch; will skip conversion."
+            exit 0
+          fi
+
+          CI_PATH_ENC=$(jq -rn --arg x ".gitlab-ci.yml" '$x|@uri')
+          CI_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "PRIVATE-TOKEN: $GL_TOKEN" \
+                      "$GL_API/projects/$PROJ_ENC/repository/files/$CI_PATH_ENC?ref=$DEF")
+          if [[ "$CI_STATUS" == "200" ]]; then
+            echo "has_ci=true" >> "$GITHUB_OUTPUT"
+            echo "Found .gitlab-ci.yml on $DEF"
+          else
+            echo "has_ci=false" >> "$GITHUB_OUTPUT"
+            echo "No .gitlab-ci.yml on $DEF; will skip conversion for this project."
+          fi
+
       - name: Dry-run conversion (writes YAML to output dir)
+        if: steps.probe.outputs.has_ci == 'true'
         shell: bash
         env:
           GL_PROJECT: ${{ matrix.project }}
@@ -580,6 +587,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "tmp/dry-run/${GH_REPO}"
+          # Run Importer without calling gh auth or api.github.com
           gh actions-importer dry-run gitlab \
             --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
             --project "${GL_PROJECT##*/}" \
@@ -587,6 +595,16 @@ jobs:
           echo "Converted workflow files are in tmp/dry-run/${GH_REPO}"
 
       - name: Upload converted workflow as artifact
+        if: steps.probe.outputs.has_ci == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}
+          path: tmp/dry-run/${{ steps.repo.outputs.gh_repo }}
+
+      # If no .gitlab-ci.yml, upload a tiny note artifact and keep job green
+      - name: Upload notice (no pipeline file found)
+        if: steps.probe.outputs.has_ci != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: glci-to-actions          name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}-no-pipeline
+          path: .
