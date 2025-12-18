@@ -27,7 +27,6 @@ jobs:
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
-      # Only from repository/environment variables (vars)
       VAR_GL_URL: ${{ vars.GL_URL }}
       VAR_GL_PROJECT: ${{ vars.GL_PROJECT }}
       VAR_GH_OWNER: ${{ vars.GH_OWNER }}
@@ -227,13 +226,11 @@ jobs:
           : "${GH_REPO:?GH_REPO empty}"
           : "${GL_API:?GL_API empty}"
           : "${GL_ENC:?GL_ENC empty}"
-
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/projects/$GL_ENC/merge_requests?scope=all&per_page=100&page=$page" > "$RESP"
-
             jq -c '.[]' "$RESP" |
             while read -r mr; do
               title=$(jq -r '.title' <<< "$mr")
@@ -277,9 +274,9 @@ jobs:
                     -H "Accept: application/vnd.github+json" -d '{"state":"closed"}' \
                     "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$pr_num" >/dev/null
                 elif [[ "$state" == "merged" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer $GH_PAT" \
+                  curl -s -o /dev/null -w "%{http\\_code}" -X PUT -H "Authorization: Bearer $GH_PAT" \
                     -H "Accept: application/vnd.github+json" -d '{"merge_method":"merge"}' \
-                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/pulls/$pr_num/merge" >/dev/null
+                    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/pulls/$pr\\_num/merge" >/dev/null
                 fi
                 sleep 1
               fi
@@ -290,7 +287,6 @@ jobs:
                 CRESP=$(mktemp) ; CHDR=$(mktemp)
                 curl -s -D "$CHDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
                   "$GL_API/projects/$GL_ENC/merge_requests/$gl_iid/notes?activity_filter=only_comments&per_page=100&page=$cpage" > "$CRESP"
-
                 jq -c '.[]' "$CRESP" |
                 while read -r note; do
                   nbody=$(jq -r '.body' <<< "$note")
@@ -301,13 +297,11 @@ jobs:
                     "https://api.github.com/repos/$GH_OWNER/$GH_REPO/issues/$pr_num/comments" >/dev/null
                   sleep 1
                 done
-
                 nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$CHDR" | tr -d '\r')
                 [[ -z "$nnext" || "$nnext" == "0" ]] && break
                 cpage="$nnext"
               done
             done
-
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
@@ -412,8 +406,6 @@ jobs:
           : "${GL_ENC:?GL_ENC is empty}"
           : "${GH_OWNER:?GH_OWNER is empty}"
           : "${GH_REPO:?GH_REPO is empty}"
-
-          # Use a here-doc to avoid HTML escaping issues
           cat > milestones.sh <<'BASH'
           set -euo pipefail
           page=1
@@ -421,7 +413,6 @@ jobs:
             RESP=$(mktemp) ; HDR=$(mktemp)
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/projects/$GL_ENC/milestones?per_page=100&page=$page" > "$RESP"
-
             jq -c '.[]' "$RESP" |
             while read -r ms; do
               title=$(jq -r '.title' <<< "$ms")
@@ -437,16 +428,14 @@ jobs:
               echo "Milestone $title status: $status"
               sleep 1
             done
-
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
           done
           BASH
-
           bash milestones.sh
 
-  # 1.6) Discover projects (NEW) → provides project_list for matrix
+  # 1.6) Discover projects → provides project_list for matrix
   discover_projects:
     name: "1.6) Discover GitLab projects for conversion"
     runs-on: ubuntu-latest
@@ -469,7 +458,6 @@ jobs:
         run: |
           set -euo pipefail
           : "${GL_URL:?GL_URL is required}"
-          # Fallback: if GL_GROUP isn't set, use parent of GL_PROJECT (if present via vars)
           GL_PROJECT="${{ vars.GL_PROJECT }}"
           DEFAULT_GROUP="${GL_PROJECT%/*}"
           GROUP_VAL="${GL_GROUP:-$DEFAULT_GROUP}"
@@ -481,7 +469,6 @@ jobs:
           projects=()
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-            # include_subgroups=true to traverse deep
             curl -s -D "$HDR" -H "PRIVATE-TOKEN: $GL_TOKEN" \
               "$GL_API/groups/$GROUP_ENC/projects?per_page=100&page=$page&include_subgroups=true" > "$RESP"
 
@@ -495,7 +482,6 @@ jobs:
             page="$next"
           done
 
-          # Emit compact JSON array like ["group/app1","group/subgroup/app2"]
           json=$(printf '%s\n' "${projects[@]:-}" | jq -R . | jq -s -c .)
           echo "Discovered $(jq 'length' <<< "$json") projects under '$GROUP_VAL'"
           echo "project_list=$json" >> "$GITHUB_OUTPUT"
@@ -524,7 +510,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Install gh if missing
           if ! command -v gh >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y gnupg software-properties-common
@@ -535,7 +520,6 @@ jobs:
             sudo apt-get install -y gh
           fi
           sudo apt-get install -y jq curl
-          # Install Docker if missing (Importer uses a Docker container)
           if ! command -v docker >/dev/null 2>&1; then
             sudo apt-get install -y docker.io
             sudo systemctl enable --now docker
@@ -572,7 +556,6 @@ jobs:
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
-
           if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
             base="$(echo "${GL_PROJECT}" | tr '/' "${GH_REPO_SEPARATOR}")"
           else
@@ -617,8 +600,125 @@ jobs:
       - name: Upload converted workflow as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}   # unique per matrix (required in v4)
-          path: tmp/dry-run/${{ steps.repo.outputs.gh_repo }}/      # REQUIRED: directory to upload
+          name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}
+          path: tmp/dry-run/${{ steps.repo.outputs.gh_repo }}/
           if-no-files-found: warn
           compression-level: 6
           overwrite: false
+          include-hidden-files: false
+
+  # 1.6) GitLab CI → GitHub Actions (migrate production: open PR)
+  ci_migration_migrate:
+    name: "1.6) ${{ matrix.project }} · GitLab CI → Actions (migrate)"
+    needs: [discover_projects, repo_migration_commit_sync]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_PAT: ${{ secrets.GH_PAT }}                 # classic PAT with 'workflow' scope
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      GL_URL: ${{ vars.GL_URL }}
+      GH_OWNER: ${{ vars.GH_OWNER }}
+      REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GL_GROUP: ${{ vars.GL_GROUP }}
+    steps:
+      - name: Ensure GitHub CLI & Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y gnupg software-properties-common
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            sudo apt-get update -y
+            sudo apt-get install -y gh
+          fi
+          sudo apt-get install -y jq curl
+          if ! command -v docker >/dev/null 2>&1; then
+            sudo apt-get install -y docker.io
+            sudo systemctl enable --now docker
+          fi
+          docker --version
+          gh --version
+
+      - name: Authenticate gh
+        shell: bash
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
+          gh auth status
+
+      - name: Install / update Actions Importer extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh extension list | grep -q '^github/gh-actions-importer'; then
+            gh extension install github/gh-actions-importer
+          fi
+          gh actions-importer update
+
+      - name: Compute destination repo name
+        id: repo
+        shell: bash
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
+          GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
+          GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
+          if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
+            base="$(echo "${GL_PROJECT}" | tr '/' "${GH_REPO_SEPARATOR}")"
+          else
+            base="${GL_PROJECT##*/}"
+          fi
+          GH_REPO="${GH_REPO_PREFIX}${base}"
+          echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
+          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
+
+      - name: Configure importer via .env.local
+        run: |
+          set -euo pipefail
+          cat > .env.local <<EOF
+          GITHUB_ACCESS_TOKEN=${GH_PAT}
+          GITHUB_INSTANCE_URL=https://github.com
+          GITLAB_ACCESS_TOKEN=${GL_TOKEN}
+          GITLAB_INSTANCE_URL=${GL_URL}
+          EOF
+
+      - name: Migrate pipeline → open PR adding workflow
+        shell: bash
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+          GH_OWNER: ${{ env.GH_OWNER }}
+        run: |
+          set -euo pipefail
+          mkdir -p "tmp/migrate/${GH_REPO}"
+          # Run migrate and capture output so we can display the PR URL if present
+          LOG_FILE="$(mktemp)"
+          gh actions-importer migrate gitlab \
+            --target-url "https://github.com/${GH_OWNER}/${GH_REPO}" \
+            --output-dir "tmp/migrate/${GH_REPO}" \
+            --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
+            --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
+
+                   # Try to extract the PR URL from the tool's output
+          PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tail -n1 || true)"
+
+          if [[ -n "${PR_URL}" ]]; then
+            echo "Migration complete. PR link: ${PR_URL}"
+          else
+            echo "Migration complete. Check the step log above for the PR URL."
