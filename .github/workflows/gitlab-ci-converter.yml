@@ -1,220 +1,75 @@
-
-name: Setup GitHub Actions Importer (REST-only, no gh/no Docker)
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: write
-  pull-requests: write
-
-env:
-  # Secrets & Vars (your requested names)
-  GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-  GH_PAT:   ${{ secrets.GH_PAT }}
-
-  VAR_GL_URL:       ${{ vars.GL_URL }}
-  VAR_GL_PROJECT:   ${{ vars.GL_PROJECT }}
-  VAR_GH_OWNER:     ${{ vars.GH_OWNER }}
-  VAR_GH_REPO:      ${{ vars.GH_REPO }}
-  VAR_AUTO_CREATE:  ${{ vars.AUTO_CREATE_REPO }}
-  VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }}
-  VAR_MIGRATE_MRS:  ${{ vars.MIGRATE_MRS }}
-
-jobs:
-  prepare:
-    name: "0) Prepare · Verify repo, clone & upload source"
+# 1.6) GitLab CI → GitHub Actions (dry-run preview)
+  ci_migration_dry_run:
+    name: "1.6) ${{ matrix.project }} · GitLab CI → Actions (dry-run)"
+    needs: [discover_projects, repo_migration_commit_sync]
     runs-on: ubuntu-latest
-    outputs:
-      default_branch: ${{ steps.check_repo.outputs.default_branch }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    env:
+      GH_PAT:             ${{ secrets.GH_PAT }}
+      GL_TOKEN:           ${{ secrets.GITLAB_TOKEN }}
+      GL_URL:             ${{ vars.GL_URL }}
+      GH_OWNER:           ${{ vars.GH_OWNER }}
+      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+      GL_GROUP:           ${{ vars.GL_GROUP }}
     steps:
-      - name: Install tools
-        shell: bash
+      - name: Install GitHub CLI & Importer extension
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y git curl jq
+          gh --version || (sudo apt-get update -y && sudo apt-get install -y gh)
+          gh extension install github/gh-actions-importer || gh extension upgrade github/gh-actions-importer
+          gh actions-importer update
 
-      - name: Export & normalize inputs
-        id: export
+      - name: Compute destination repo name
+        id: repo
         shell: bash
+        env:
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
-          norm_bool() {
-            case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-              true|1|yes|y) echo "true" ;;
-              false|0|no|n|"") echo "false" ;;
-              *) echo "false" ;;
-            esac
-          }
-          AUTO_CREATE="$(norm_bool "${VAR_AUTO_CREATE:-false}")"
-          DELETE_FIRST="$(norm_bool "${VAR_DELETE_FIRST:-false}")"
-          MIGRATE_MRS="$(norm_bool "${VAR_MIGRATE_MRS:-false}")"
-          missing=()
-          [[ -z "${VAR_GH_OWNER:-}" ]] && missing+=("VAR_GH_OWNER")
-          [[ -z "${VAR_GH_REPO:-}"  ]] && missing+=("VAR_GH_REPO")
-          [[ -z "${GH_PAT:-}"       ]] && missing+=("GH_PAT secret (repo+workflow scopes)")
-          if [[ "${#missing[@]}" -gt 0 ]]; then
-            echo "❌ Missing inputs: ${missing[*]}"; exit 1
-          fi
-          {
-            echo "gl_url=${VAR_GL_URL}"
-            echo "gl_project=${VAR_GL_PROJECT}"
-            echo "gh_owner=${VAR_GH_OWNER}"
-            echo "gh_repo=${VAR_GH_REPO}"
-            echo "auto_create=${AUTO_CREATE}"
-            echo "delete_first=${DELETE_FIRST}"
-            echo "migrate_mrs=${MIGRATE_MRS}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Verify repo via GitHub REST API
-        id: check_repo
-        shell: bash
-        run: |
-          set -euo pipefail
-          REPO_API="https://api.github.com/repos/${VAR_GH_OWNER}/${VAR_GH_REPO}"
-          RESP="$(curl -s \
-            -H "Authorization: Bearer ${GH_PAT}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${REPO_API}")"
-          if echo "${RESP}" | jq -e '.message | select(.=="Not Found")' >/dev/null; then
-            echo "❌ Repo not found: ${VAR_GH_OWNER}/${VAR_GH_REPO}"
-            exit 1
-          fi
-          DEFAULT_BRANCH="$(echo "${RESP}" | jq -r '.default_branch')"
-          [[ -n "${DEFAULT_BRANCH}" && "${DEFAULT_BRANCH}" != "null" ]] || DEFAULT_BRANCH="main"
-          echo "default_branch=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
-          echo "✅ Repo exists. Default branch: ${DEFAULT_BRANCH}"
-          # Docs: GET /repos/{owner}/{repo} – default_branch
-
-      - name: Clone repo via GH_PAT
-        shell: bash
-        run: |
-          set -euo pipefail
-          WORKDIR="$(mktemp -d)"
-          echo "WORKDIR=${WORKDIR}" >> "$GITHUB_ENV"
-          REPO_URL="https://${GH_PAT}@github.com/${VAR_GH_OWNER}/${VAR_GH_REPO}.git"
-          git clone "${REPO_URL}" "${WORKDIR}/repo"
-          cd "${WORKDIR}/repo"
-          git checkout "${{ steps.check_repo.outputs.default_branch }}"
-          echo "✅ Repo cloned to ${WORKDIR}/repo"
-
-      - name: Detect .gitlab-ci.yml
-        id: detect
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC="${WORKDIR}/repo/.gitlab-ci.yml"
-          if [[ -f "${SRC}" ]]; then
-            echo "gitlab_ci_path=${SRC}" >> "$GITHUB_OUTPUT"
-            echo "✅ Found .gitlab-ci.yml"
+          REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
+          GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
+          GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
+          if [[ "$REPO_NAME_MODE" == "fullpath" ]]; then
+            base="$(echo "$GL_PROJECT" | tr '/' "$GH_REPO_SEPARATOR")"
           else
-            echo "ℹ️ No .gitlab-ci.yml found; exiting workflow."
-            exit 0
+            base="${GL_PROJECT##*/}"
           fi
+          GH_REPO="${GH_REPO_PREFIX}${base}"
+          echo "gh_repo=$GH_REPO" >> "$GITHUB_OUTPUT"
 
-      - name: Upload source artifact (.gitlab-ci.yml)
+      - name: Configure importer via .env.local (non-interactive)
+        run: |
+          set -euo pipefail
+          cat > .env.local <<EOF
+          GITHUB_ACCESS_TOKEN=${GH_PAT}
+          GITHUB_INSTANCE_URL=https://github.com
+          GITLAB_ACCESS_TOKEN=${GL_TOKEN}
+          GITLAB_INSTANCE_URL=${GL_URL}
+          EOF
+
+      - name: Dry-run conversion (writes YAML to output dir)
+        shell: bash
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+          GH_REPO:    ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          mkdir -p "tmp/dry-run/${GH_REPO}"
+          gh actions-importer dry-run gitlab \
+            --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
+            --project  "${GL_PROJECT##*/}" \
+            --output-dir "tmp/dry-run/${GH_REPO}"
+          echo "Converted workflow files are in tmp/dry-run/${GH_REPO}"
+
+      - name: Upload converted workflow as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gitlab-ci-source
-          path: ${{ steps.detect.outputs.gitlab_ci_path }}
-
-  convert:
-    name: "1) Convert · Reusable converter workflow"
-    runs-on: ubuntu-latest
-    needs: [prepare]
-    # Call the reusable workflow (job-level 'uses')
-    uses: ./.github/workflows/gitlab-ci-converter.yml
-    with:
-      source_artifact_name: gitlab-ci-source
-    secrets:
-      GH_PAT: ${{ secrets.GH_PAT }}
-
-  publish:
-    name: "2) Publish · Commit, push & open PR (REST)"
-    runs-on: ubuntu-latest
-    needs: [prepare, convert]
-    outputs:
-      pr_url: ${{ steps.open_pr.outputs.pr_url }}
-    steps:
-      - name: Install tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y git curl jq
-
-      - name: Download converted workflow artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: converted-workflow
-          path: converted_out
-
-      - name: Clone repo again
-        shell: bash
-        run: |
-          set -euo pipefail
-          WORKDIR="$(mktemp -d)"
-          echo "WORKDIR=${WORKDIR}" >> "$GITHUB_ENV"
-          REPO_URL="https://${GH_PAT}@github.com/${VAR_GH_OWNER}/${VAR_GH_REPO}.git"
-          git clone "${REPO_URL}" "${WORKDIR}/repo"
-          cd "${WORKDIR}/repo"
-          git checkout "${{ needs.prepare.outputs.default_branch }}"
-
-      - name: Stage converted workflow into repo
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${WORKDIR}/repo"
-          mkdir -p .github/workflows
-          mv "${GITHUB_WORKSPACE}/converted_out/gitlab-pipeline-converted.yml" \
-             ".github/workflows/gitlab-pipeline-converted.yml"
-          ls -la .github/workflows
-
-      - name: Commit & push branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${WORKDIR}/repo"
-          BRANCH="ci-migration-$(date +%s)"
-          git config user.name "actions-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git checkout -b "${BRANCH}"
-          git add .github/workflows/gitlab-pipeline-converted.yml
-          git commit -m "Add converted GitHub Actions workflow from .gitlab-ci.yml (best-effort)"
-          git push "https://${GH_PAT}@github.com/${VAR_GH_OWNER}/${VAR_GH_REPO}.git" "${BRANCH}"
-          echo "BRANCH=${BRANCH}" >> "$GITHUB_ENV"
-          echo "✅ Pushed branch ${BRANCH}"
-
-      - name: Open PR via GitHub REST API
-        id: open_pr
-        shell: bash
-        run: |
-          set -euo pipefail
-          BASE="${{ needs.prepare.outputs.default_branch }}"
-          HEAD="${BRANCH}"
-          API="https://api.github.com/repos/${VAR_GH_OWNER}/${VAR_GH_REPO}/pulls"
-
-          DATA=$(jq -n \
-            --arg title "Convert .gitlab-ci.yml to GitHub Actions (best-effort)" \
-            --arg head  "${HEAD}" \
-            --arg base  "${BASE}" \
-            --arg body  "This PR adds a best-effort converted workflow from .gitlab-ci.yml.\n\n**Manual follow-up:**\n- Map rules/only/except to \`on:\`\n- Map services to service containers\n- Add \`actions/cache\` where needed\n- Validate with actionlint\n\nDocs:\n- Get repo & default branch: https://docs.github.com/en/rest/repos/repos#get-a-repository\n- Create PR: https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request" \
-            '{title:$title, head:$head, base:$base, body:$body}')
-
-          RESP="$(curl -s -X POST \
-            -H "Authorization: Bearer ${GH_PAT}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "Content-Type: application/json" \
-            "${API}" -d "${DATA}")"
-
-          PR_URL="$(echo "${RESP}" | jq -r '.html_url // empty')"
-          if [[ -z "${PR_URL}" ]]; then
-            echo "❌ Failed to create PR. Response            echo "❌ Failed to create PR. Response:"
-            echo "${RESP}"
-            exit 1
-          fi
-
-          echo "pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
+          name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}
+          path: tmp/dry-run/${{ steps.repo.outputs.gh_repo }}
+          retention-days: 7
