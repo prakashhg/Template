@@ -38,7 +38,8 @@ jobs:
       VAR_DELETE_FIRST: ${{ vars.DELETE_DEST_REPO_FIRST }} # ignored; we do not delete
       VAR_MIGRATE_MRS: ${{ vars.MIGRATE_MRS }}
       VAR_INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }} # optional: initialize destination when source has no branches (default false)
-    steps:
+
+steps:
       - name: Install tools
         shell: bash
         run: |
@@ -56,14 +57,13 @@ jobs:
           GH_OWNER="${VAR_GH_OWNER:-}"
           GH_REPO="${VAR_GH_REPO:-}"
           AUTO_CREATE="${VAR_AUTO_CREATE:-true}"
-          DELETE_FIRST="${VAR_DELETE_FIRST:-false}" # not used
+          DELETE_FIRST="${VAR_DELETE_FIRST:-false}"
           MIGRATE_MRS="${VAR_MIGRATE_MRS:-true}"
-          INIT_IF_EMPTY_DEST="${VAR_INIT_IF_EMPTY_DEST:-false}"
 
           [[ -z "${GL_PROJECT}" ]] && echo "ERROR: GL_PROJECT required (vars)" && exit 1
           [[ -z "${GH_OWNER}" || -z "${GH_REPO}" ]] && echo "ERROR: GH_OWNER/GH_REPO required (vars)" && exit 1
           [[ -z "${GL_TOKEN:-}" ]] && echo "ERROR: Missing secret GITLAB_TOKEN" && exit 1
-          [[ -z "${GH_PAT:-}" ]] && echo "ERROR: Missing secret GH_PAT (PAT classic with repo+workflow scopes)" && exit 1
+          [[ -z "${GH_PAT:-}" ]] && echo "ERROR: Missing secret GH_PAT" && exit 1
 
           {
             echo "GL_URL=${GL_URL}"
@@ -73,7 +73,6 @@ jobs:
             echo "AUTO_CREATE=${AUTO_CREATE}"
             echo "DELETE_FIRST=${DELETE_FIRST}"
             echo "MIGRATE_MRS=${MIGRATE_MRS}"
-            echo "INIT_IF_EMPTY_DEST=${INIT_IF_EMPTY_DEST}"
             echo "WORKDIR=/tmp/mirror-work"
           } >> "$GITHUB_ENV"
 
@@ -89,10 +88,21 @@ jobs:
             echo "auto_create=${AUTO_CREATE}"
             echo "delete_first=${DELETE_FIRST}"
             echo "migrate_mrs=${MIGRATE_MRS}"
-            echo "init_if_empty_dest=${INIT_IF_EMPTY_DEST}"
           } >> "$GITHUB_OUTPUT"
 
-      # ❌ Deletion step removed — we never delete destination repos
+      - name: Optionally delete destination repository (DANGER)
+        if: env.DELETE_FIRST == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO_URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+            "${REPO_URL}")
+          echo "Delete HTTP status: ${STATUS}"
+          if [[ "${STATUS}" != "204" && "${STATUS}" != "404" ]]; then
+            echo "ERROR: Delete failed (HTTP ${STATUS})."; exit 1
+          fi
 
       - name: Create GitHub repo if missing
         if: env.AUTO_CREATE == 'true'
@@ -111,50 +121,12 @@ jobs:
               CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
             fi
             PAYLOAD=$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
-            RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-              -H "Content-Type: application/json" -d "${PAYLOAD}" "${CREATE_URL}")
+            RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Content-Type: application/json" -d "${PAYLOAD}" "${CREATE_URL}")
             HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
-            if [[ "${HTTP}" != "201" ]]; then
-              echo "Failed to create repo (HTTP ${HTTP})."; exit 1
-            fi
+            [[ "${HTTP}" == "201" ]] || { echo "Failed to create repo (HTTP ${HTTP})."; exit 1; }
           fi
           echo "GH repo ready: https://github.com/${GH_OWNER}/${GH_REPO}"
           sleep 1
-
-      - name: Prepare GitLab API (safe encoding)
-        id: glapi
-        shell: bash
-        run: |
-          set -euo pipefail
-          GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
-          echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
-          echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-
-      - name: Check GitLab source branches (skip mirror if empty)
-        id: srcbranches
-        shell: bash
-        run: |
-          set -euo pipefail
-          RESP=$(mktemp)
-          if ! curl --fail-with-body -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1" > "${RESP}"; then
-            echo "ERROR: Could not list GitLab branches"; head -c 300 "${RESP}" || true; exit 1
-          fi
-          TYPE=$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")
-          if [[ "${TYPE}" != "array" ]]; then
-            echo "WARN: Unexpected GitLab response for branches (type=${TYPE})"; head -c 300 "${RESP}" || true
-            echo "has_branches=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          COUNT=$(jq 'length' "${RESP}")
-          if [[ "${COUNT}" -ge 1 ]]; then
-            echo "GitLab source has ${COUNT} branches."
-            echo "has_branches=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "GitLab source has NO branches."
-            echo "has_branches=false" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Clone GitLab mirror (branches & commits)
         shell: bash
@@ -178,6 +150,7 @@ jobs:
           git remote add github "${PUSH_URL}"
           echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
           git push --mirror github
+
 
       - name: Optionally initialize destination if source is empty
         if: steps.srcbranches.outputs.has_branches != 'true' && env.INIT_IF_EMPTY_DEST == 'true'
