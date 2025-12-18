@@ -550,7 +550,7 @@ jobs:
           echo "Converted workflow files are in tmp/dry-run/${GH_REPO}"
 
       - name: Upload converted workflow as artifact
-               uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v4
         with:
           name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}
           path: tmp/dry-run/${{ steps.repo.outputs.gh_repo }}
