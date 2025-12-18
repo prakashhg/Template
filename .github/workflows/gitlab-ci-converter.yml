@@ -114,7 +114,6 @@ jobs:
             fi
           fi
           echo "GH repo ready: https://github.com/${GH_OWNER}/${GH_REPO}"
-          echo "HEAD-ref endpoint example: https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/main"
           sleep 1
 
       - name: Clone GitLab mirror (branches & commits)
@@ -273,7 +272,7 @@ jobs:
               fi
 
               if [[ -n "${pr_num}" ]]; then
-                if [[ "${state}" == "closed" ]]; then
+                if [[ "${state}" == "closed" ]] ; then
                   curl -s -o /dev/null -w "%{http_code}" -X PATCH \
                     -H "Authorization: Bearer ${GH_PAT}" \
                     -H "Accept: application/vnd.github+json" \
@@ -809,8 +808,8 @@ jobs:
             echo "Created https://github.com/${GH_OWNER}/${GH_REPO}"
           fi
 
-      # 🔧 NEW: Preflight to avoid 409 on refs/heads/main by ensuring a base branch exists
-      - name: Ensure base branch is ready for PR (create 'main' if needed)
+      # 🔧 NEW: Preflight to use the default branch only (no 'main' creation)
+      - name: Ensure default branch points to an existing branch
         shell: bash
         env:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
@@ -818,45 +817,40 @@ jobs:
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
 
-          # 1) Wait until the repository has at least one branch (mirror push might still be finishing)
-          for i in {1..20}; do
-            BR_LIST="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=1")" || BR_LIST="[]"
+          # 1) Wait until at least one branch exists (mirror push can take a moment)
+          for i in {1..30}; do
+            BR_LIST="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")" || BR_LIST="[]"
             BR_LEN="$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)"
             if [[ "${BR_LEN}" -ge 1 ]]; then
-              echo "Branch(es) detected."
+              echo "Branch(es) detected: ${BR_LEN}"
               break
             fi
-            echo "No branches yet; waiting... (${i}/20)"
+            echo "No branches yet; waiting... (${i}/30)"
             sleep 3
           done
+          BR_LEN="$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)"
+          [[ "${BR_LEN}" -lt 1 ]] && { echo "ERROR: No branches found after waiting. Mirror push may have failed."; exit 1; }
 
-          # 2) Determine default branch (fallback to first branch)
-          DEFAULT="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')"
-          if [[ -z "${DEFAULT}" || "${DEFAULT}" == "null" ]]; then
-            DEFAULT="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches" | jq -r '.[0].name // empty')"
-          fi
-          : "${DEFAULT:?Failed to determine a base branch}"
-          echo "Default/first branch detected: ${DEFAULT}"
+          # 2) Read current default branch; if missing/mismatched, switch to the first existing branch
+          CURRENT_DEFAULT="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')"
+          FIRST_BRANCH="$(jq -r '.[0].name' <<< "${BR_LIST}")"
 
-          # 3) Ensure refs/heads/main exists; if not, create it from the default branch's commit
-          MAIN_STATUS="$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${API}/git/refs/heads/main")"
-          if [[ "${MAIN_STATUS}" != "200" ]]; then
-            echo "Creating 'main' ref from '${DEFAULT}'..."
-            SHA="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/git/refs/heads/${DEFAULT}" | jq -r '.object.sha')"
-            [[ -z "${SHA}" || "${SHA}" == "null" ]] && { echo "ERROR: Could not resolve SHA of ${DEFAULT}."; exit 1; }
-
-            # POST /git/refs to create refs/heads/main at SHA
-            CREATE_HTTP="$(curl -s -o /dev/null -w "%{http_code}" \
-              -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-              -d "{\"ref\":\"refs/heads/main\",\"sha\":\"${SHA}\"}" \
-              "${API}/git/refs")"
-            if [[ "${CREATE_HTTP}" != "201" && "${CREATE_HTTP}" != "200" ]]; then
-              echo "ERROR: Creating main failed (HTTP ${CREATE_HTTP})"; exit 1;
+          # Is CURRENT_DEFAULT among the existing branches?
+          HAS_DEFAULT="$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")"
+          if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
+            echo "Updating default branch to '${FIRST_BRANCH}' (existing branch)."
+            # PATCH /repos/{owner}/{repo} with default_branch
+            UPDATE_HTTP="$(curl -s -o /dev/null -w "%{http_code}" \
+              -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+              -d "{\"default_branch\":\"${FIRST_BRANCH}\"}" \
+              "${API}")"
+            if [[ "${UPDATE_HTTP}" != "200" ]]; then
+              echo "ERROR: Failed to update default branch (HTTP ${UPDATE_HTTP})."; exit 1;
             fi
-            echo "refs/heads/main created at ${SHA}"
           else
-            echo "'main' already exists; continuing."
+            echo "Default branch '${CURRENT_DEFAULT}' exists; continuing."
           fi
+          echo "Default branch ready."
 
       - name: Migrate pipeline → open PR adding workflow
         shell: bash
@@ -878,7 +872,6 @@ jobs:
           # Extract PR URL robustly (strip quotes/CRs)
           PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tr -d '"'\'' | tail -n1 || true)"
           if [[ -n "${PR_URL}" ]]; then
-            echo "Migration complete. PR link: ${PR_URL}"
+            echo "Migration complete. PR            echo "Migration complete. PR link: ${PR_URL}"
           else
             echo "Migration complete. Check the step log above for the PR URL."
-          fi
