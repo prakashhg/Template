@@ -16,7 +16,7 @@ jobs:
   repo_migration_commit_sync:
     name: "1) Repo Migration · 1.1 Commit Sync"
     runs-on: ubuntu-latest
-    # Optional skip guard you already had for “deletion_scheduled-”
+    # Optional skip guard for repos marked for deletion in naming convention
     if: ${{ !contains(vars.GH_REPO, 'deletion_scheduled-') }}
     outputs:
       gl_url: ${{ steps.export.outputs.gl_url }}
@@ -39,7 +39,7 @@ jobs:
       VAR_MIGRATE_MRS:         ${{ vars.MIGRATE_MRS }}
       VAR_INIT_IF_EMPTY_DEST:  ${{ vars.INIT_IF_EMPTY_DEST }}
     steps:
-      - name: Install tools
+      - name: 'Install jq, curl & git'
         shell: bash
         run: |
           set -euo pipefail
@@ -232,15 +232,15 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !contains(needs.repo_migration_commit_sync.outputs.gh_repo, 'deletion_scheduled-') }}
     env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:   ${{ secrets.GH_PAT }}
-      GL_URL:   ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
+      GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:    ${{ secrets.GH_PAT }}
+      GL_URL:    ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
       GL_PROJECT: ${{ needs.repo_migration_commit_sync.outputs.gl_project }}
-      GH_OWNER: ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
-      GH_REPO:  ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
-      WORKDIR: /tmp/mirror-work
+      GH_OWNER:  ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
+      GH_REPO:   ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
+      WORKDIR:   /tmp/mirror-work
     steps:
-      - name: Install git
+      - name: 'Install git'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y git
@@ -291,14 +291,14 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ needs.repo_migration_commit_sync.outputs.migrate_mrs == 'true' && !contains(needs.repo_migration_commit_sync.outputs.gh_repo, 'deletion_scheduled-') }}
     env:
-      GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:    ${{ secrets.GH_PAT }}
-      GL_URL:    ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
-      GL_PROJECT:${{ needs.repo_migration_commit_sync.outputs.gl_project }}
-      GH_OWNER:  ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
-      GH_REPO:   ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
+      GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:     ${{ secrets.GH_PAT }}
+      GL_URL:     ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
+      GL_PROJECT: ${{ needs.repo_migration_commit_sync.outputs.gl_project }}
+      GH_OWNER:   ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
+      GH_REPO:    ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
     steps:
-      - name: Install jq & curl
+      - name: 'Install jq & curl'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq curl
@@ -402,14 +402,14 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !contains(needs.repo_migration_commit_sync.outputs.gh_repo, 'deletion_scheduled-') }}
     env:
-      GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:    ${{ secrets.GH_PAT }}
-      GL_URL:    ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
-      GL_PROJECT:${{ needs.repo_migration_commit_sync.outputs.gl_project }}
-      GH_OWNER:  ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
-      GH_REPO:   ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
+      GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:     ${{ secrets.GH_PAT }}
+      GL_URL:     ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
+      GL_PROJECT: ${{ needs.repo_migration_commit_sync.outputs.gl_project }}
+      GH_OWNER:   ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
+      GH_REPO:    ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
     steps:
-      - name: Install jq & curl
+      - name: 'Install jq & curl'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq curl
@@ -467,14 +467,14 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !contains(needs.repo_migration_commit_sync.outputs.gh_repo, 'deletion_scheduled-') }}
     env:
-      GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:    ${{ secrets.GH_PAT }}
-      GL_URL:    ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
-      GL_PROJECT:${{ needs.repo_migration_commit_sync.outputs.gl_project }}
-      GH_OWNER:  ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
-      GH_REPO:   ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
+      GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:     ${{ secrets.GH_PAT }}
+      GL_URL:     ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
+      GL_PROJECT: ${{ needs.repo_migration_commit_sync.outputs.gl_project }}
+      GH_OWNER:   ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
+      GH_REPO:    ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
     steps:
-      - name: Install jq & curl
+      - name: 'Install jq & curl'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq curl
@@ -531,7 +531,7 @@ jobs:
       GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
     steps:
-      - name: Install jq & curl
+      - name: 'Install jq & curl'
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -603,7 +603,7 @@ jobs:
       GH_REPO_SEPARATOR:   ${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP:            ${{ vars.GL_GROUP }}
     steps:
-      - name: Ensure GitHub CLI & Docker are available
+      - name: 'Ensure GitHub CLI & Docker are available'
         shell: bash
         run: |
           set -euo pipefail
@@ -624,7 +624,7 @@ jobs:
           docker --version
           gh --version
 
-      - name: Authenticate gh (for GHCR pulls)
+      - name: 'Authenticate gh (for GHCR pulls)'
         shell: bash
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -633,7 +633,7 @@ jobs:
           echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
           gh auth status
 
-      - name: Install Actions Importer extension and verify
+      - name: 'Install Actions Importer extension and verify'
         shell: bash
         run: |
           set -euo pipefail
@@ -729,7 +729,7 @@ jobs:
       GH_REPO_SEPARATOR:   ${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP:            ${{ vars.GL_GROUP }}
     steps:
-      - name: Ensure GitHub CLI & Docker
+      - name: 'Ensure GitHub CLI & Docker'
         shell: bash
         run: |
           set -euo pipefail
@@ -750,7 +750,7 @@ jobs:
           docker --version
           gh --version
 
-      - name: Authenticate gh
+      - name: 'Authenticate gh'
         shell: bash
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -759,7 +759,7 @@ jobs:
           echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
           gh auth status
 
-      - name: Install / update Actions Importer extension
+      - name: 'Install / update Actions Importer extension'
         shell: bash
         run: |
           set -euo pipefail
@@ -776,4 +776,119 @@ jobs:
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
-          if [[ "${
+          if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
+            base="$(echo "${GL_PROJECT}" | tr '/' "${GH_REPO_SEPARATOR}")"
+          else
+            base="${GL_PROJECT##*/}"
+          fi
+          GH_REPO="${GH_REPO_PREFIX}${base}"
+          echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
+          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
+
+      - name: Skip if destination repo is deletion-scheduled
+        shell: bash
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          if [[ "${GH_REPO}" == *deletion_scheduled-* ]]; then
+            echo "Skipping repo marked for deletion: ${GH_OWNER}/${GH_REPO}"
+            exit 0
+          fi
+
+      - name: Configure importer via .env.local
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .env.local <<EOF
+          GITHUB_ACCESS_TOKEN=${GH_PAT}
+          GITHUB_INSTANCE_URL=https://github.com
+          GITLAB_ACCESS_TOKEN=${GL_TOKEN}
+          GITLAB_INSTANCE_URL=${GL_URL}
+          EOF
+
+      - name: Ensure destination repo exists (create if missing)
+        shell: bash
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${API}")
+          if [[ "${STATUS}" == "200" ]]; then
+            echo "Repo ${GH_OWNER}/${GH_REPO} exists."
+          else
+            echo "Repo ${GH_OWNER}/${GH_REPO} not found (HTTP ${STATUS}); creating..."
+            MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
+            if [[ "${GH_OWNER}" == "${MY_LOGIN}" ]]; then
+              CREATE_URL="https://api.github.com/user/repos"
+            else
+              CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
+            fi
+            PAYLOAD=$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
+            RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
+                   -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
+                   -d "${PAYLOAD}" "${CREATE_URL}")
+            HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
+            [[ "${HTTP}" == "201" ]] || { echo "ERROR: Create repo failed (HTTP ${HTTP})"; exit 1; }
+            echo "Created https://github.com/${GH_OWNER}/${GH_REPO}"
+          fi
+
+      - name: Ensure default branch points to an existing branch
+        shell: bash
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+
+          # Wait for branches to appear (mirror job may still be pushing)
+          for i in {1..30}; do
+            BR_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")
+            BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
+            if [[ "${BR_LEN}" -ge 1 ]]; then
+              echo "Branch(es) detected: ${BR_LEN}"
+              break
+            fi
+            echo "No branches yet; waiting... (${i}/30)"
+            sleep 3
+          done
+
+          BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
+          [[ "${BR_LEN}" -lt 1 ]] && { echo "ERROR: No branches found after waiting. Mirror push may have failed or dest uninitialized."; exit 1; }
+
+          CURRENT_DEFAULT=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')
+          FIRST_BRANCH=$(jq -r '.[0].name' <<< "${BR_LIST}")
+          HAS_DEFAULT=$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")
+
+          if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
+            echo "Updating default branch to '${FIRST_BRANCH}' (existing branch)."
+            UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+                          -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                          -d "{\"default_branch\":\"${FIRST_BRANCH}\"}" "${API}")
+            [[ "${UPDATE_HTTP}" == "200" ]] || { echo "ERROR: Failed to update default branch (HTTP ${UPDATE_HTTP})."; exit 1; }
+          else
+            echo "Default branch '${CURRENT_DEFAULT}' exists; continuing."
+          fi
+
+      - name: Migrate pipeline → open PR adding workflow
+        shell: bash
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+          GH_REPO:    ${{ steps.repo.outputs.gh_repo }}
+          GH_OWNER:   ${{ env.GH_OWNER }}
+        run: |
+          set -euo pipefail
+          mkdir -p "tmp/migrate/${GH_REPO}"
+          LOG_FILE="$(mktemp)"
+          gh actions-importer migrate gitlab \
+            --target-url "https://github.com/${GH_OWNER}/${GH_REPO}" \
+            --output-dir "tmp/migrate/${GH_REPO}" \
+            --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
+            --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
+
+          PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tail -n1 || true)"
+          if [[ -n "${PR_URL}" ]]; then
+            echo "Migration complete. PR link: ${PR_URL}"
+          else
+            echo "Migration complete. Check            echo "Migration complete. Check the step log above for the PR URL."
