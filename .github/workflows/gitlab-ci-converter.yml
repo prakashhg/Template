@@ -189,7 +189,7 @@ jobs:
     name: "1) Repo Migration · 1.3 PR Sync (MR → PR)"
     needs: repo_migration_commit_sync
     runs-on: ubuntu-latest
-    # 🚫 Skip if GH repo deletion-scheduled OR if MRs disabled via output
+    # 🚫 Skip if GH repo deletion-scheduled OR MRs disabled
     if: ${{ needs.repo_migration_commit_sync.outputs.migrate_mrs == 'true' && !contains(needs.repo_migration_commit_sync.outputs.gh_repo, 'deletion_scheduled-') }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
@@ -610,6 +610,7 @@ jobs:
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
+
           if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
             base="$(echo "${GL_PROJECT}" | tr '/' "${GH_REPO_SEPARATOR}")"
           else
@@ -808,6 +809,55 @@ jobs:
             echo "Created https://github.com/${GH_OWNER}/${GH_REPO}"
           fi
 
+      # 🔧 NEW: Preflight to avoid 409 on refs/heads/main by ensuring a base branch exists
+      - name: Ensure base branch is ready for PR (create 'main' if needed)
+        shell: bash
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+
+          # 1) Wait until the repository has at least one branch (mirror push might still be finishing)
+          for i in {1..20}; do
+            BR_LIST="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=1")" || BR_LIST="[]"
+            BR_LEN="$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)"
+            if [[ "${BR_LEN}" -ge 1 ]]; then
+              echo "Branch(es) detected."
+              break
+            fi
+            echo "No branches yet; waiting... (${i}/20)"
+            sleep 3
+          done
+
+          # 2) Determine default branch (fallback to first branch)
+          DEFAULT="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')"
+          if [[ -z "${DEFAULT}" || "${DEFAULT}" == "null" ]]; then
+            DEFAULT="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches" | jq -r '.[0].name // empty')"
+          fi
+          : "${DEFAULT:?Failed to determine a base branch}"
+          echo "Default/first branch detected: ${DEFAULT}"
+
+          # 3) Ensure refs/heads/main exists; if not, create it from the default branch's commit
+          MAIN_STATUS="$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${API}/git/refs/heads/main")"
+          if [[ "${MAIN_STATUS}" != "200" ]]; then
+            echo "Creating 'main' ref from '${DEFAULT}'..."
+            SHA="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/git/refs/heads/${DEFAULT}" | jq -r '.object.sha')"
+            [[ -z "${SHA}" || "${SHA}" == "null" ]] && { echo "ERROR: Could not resolve SHA of ${DEFAULT}."; exit 1; }
+
+            # POST /git/refs to create refs/heads/main at SHA
+            CREATE_HTTP="$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+              -d "{\"ref\":\"refs/heads/main\",\"sha\":\"${SHA}\"}" \
+              "${API}/git/refs")"
+            if [[ "${CREATE_HTTP}" != "201" && "${CREATE_HTTP}" != "200" ]]; then
+              echo "ERROR: Creating main failed (HTTP ${CREATE_HTTP})"; exit 1;
+            fi
+            echo "refs/heads/main created at ${SHA}"
+          else
+            echo "'main' already exists; continuing."
+          fi
+
       - name: Migrate pipeline → open PR adding workflow
         shell: bash
         env:
@@ -825,6 +875,7 @@ jobs:
             --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
             --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
 
+          # Extract PR URL robustly (strip quotes/CRs)
           PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tr -d '"'\'' | tail -n1 || true)"
           if [[ -n "${PR_URL}" ]]; then
             echo "Migration complete. PR link: ${PR_URL}"
