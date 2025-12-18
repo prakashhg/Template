@@ -589,4 +589,4 @@ jobs:
       - name: Upload converted workflow as artifact
         uses: actions/upload-artifact@v4
         with:
-          name:          name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}
+          name: glci-to-actions-${{ steps.repo.outputs.gh_repo }}
