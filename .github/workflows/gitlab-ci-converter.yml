@@ -341,74 +341,100 @@ jobs:
             page="${next}"
           done
 
-  # 1) Repo Migration · 1.4 Label Sync
-  repo_migration_label_sync:
-    name: "1) Repo Migration · 1.4 Label Sync"
-    needs: repo_migration_commit_sync
-    runs-on: ubuntu-latest
-    if: ${{ !contains(needs.repo_migration_commit_sync.outputs.gh_repo, 'deletion_scheduled-') }}
-    env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT: ${{ secrets.GH_PAT }}
-      GL_URL: ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
-      GL_PROJECT: ${{ needs.repo_migration_commit_sync.outputs.gl_project }}
-      GH_OWNER: ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
-      GH_REPO: ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
-    steps:
-      - name: Install jq & curl
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl
+# 1) Repo Migration · 1.4 Label Sync
+repo_migration_label_sync:
+  name: "1) Repo Migration · 1.4 Label Sync"
+  needs: repo_migration_commit_sync
+  runs-on: ubuntu-latest
+  if: ${{ !contains(needs.repo_migration_commit_sync.outputs.gh_repo, 'deletion_scheduled-') }}
+  env:
+    GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+    GH_PAT: ${{ secrets.GH_PAT }}
+    GL_URL: ${{ needs.repo_migration_commit_sync.outputs.gl_url }}
+    GL_PROJECT: ${{ needs.repo_migration_commit_sync.outputs.gl_project }}
+    GH_OWNER: ${{ needs.repo_migration_commit_sync.outputs.gh_owner }}
+    GH_REPO: ${{ needs.repo_migration_commit_sync.outputs.gh_repo }}
+  steps:
+    - name: Install jq & curl
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y jq curl
 
-      - name: Prepare GitLab API (safe encoding)
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ -z "${GL_URL:-}" ]] && { echo "GL_URL missing"; exit 1; }
-          [[ -z "${GL_PROJECT:-}" ]] && { echo "GL_PROJECT missing"; exit 1; }
-          GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
-          echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
-          echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
+    - name: Prepare GitLab API (safe encoding)
+      shell: bash
+      run: |
+        set -euo pipefail
+        [[ -z "${GL_URL:-}" ]] && { echo "GL_URL missing"; exit 1; }
+        [[ -z "${GL_PROJECT:-}" ]] && { echo "GL_PROJECT missing"; exit 1; }
+        GL_API="${GL_URL%/}/api/v4"
+        GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
+        echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
+        echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
-      - name: Migrate labels (GitLab → GitHub)
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${GL_API:?GL_API is empty}"
-          : "${GL_ENC:?GL_ENC is empty}"
-          : "${GH_OWNER:?GH_OWNER is empty}"
-          : "${GH_REPO:?GH_REPO is empty}"
+    - name: Migrate labels (GitLab → GitHub) — robust
+      shell: bash
+      run: |
+        set -euo pipefail
+        : "${GL_API:?GL_API is empty}"
+        : "${GL_ENC:?GL_ENC is empty}"
+        : "${GH_OWNER:?GH_OWNER is empty}"
+        : "${GH_REPO:?GH_REPO is empty}"
 
-          page=1
-          while true; do
-            RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${GL_ENC}/labels?per_page=100&page=${page}" > "${RESP}"
+        page=1
+        while true; do
+          RESP=$(mktemp) ; HDR=$(mktemp)
 
-            jq -c '.[]' "${RESP}" | while read -r lbl; do
-              name=$(printf '%s' "${lbl}" | jq -r '.name')
-              color=$(printf '%s' "${lbl}" | jq -r '.color' | sed 's/^#//')
-              description=$(printf '%s' "${lbl}" | jq -r '.description // empty')
+          # Fail fast on HTTP errors and keep body for diagnostics
+          if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+            "${GL_API}/projects/${GL_ENC}/labels?per_page=100&page=${page}" > "${RESP}"; then
+            echo "ERROR: GitLab Labels API returned non-2xx for page ${page}."
+            echo "Headers:"; cat "${HDR}" || true
+            echo "Body (first 300 bytes):"; head -c 300 "${RESP}" || true
+            exit 1
+          fi
 
-              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
+          # Validate that the body is a JSON array
+          if [[ "$(jq -r 'type' "${RESP}" 2>/dev/null || echo 'unknown')" != "array" ]]; then
+            echo "WARN: Labels API did not return a JSON array on page ${page}."
+            head -c 300 "${RESP}" || true
+            break
+          fi
+
+          # Iterate each label safely; avoid <<< and use printf piping
+          jq -c '.[]' "${RESP}" | while IFS= read -r lbl; do
+            name=$(printf '%s' "${lbl}" | jq -r '.name')
+            color=$(printf '%s' "${lbl}" | jq -r '.color' | sed 's/^#//')
+            description=$(printf '%s' "${lbl}" | jq -r '.description // empty')
+
+            # Create label (POST)
+            CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+              -H "Authorization: Bearer ${GH_PAT}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg name "${name}" --arg color "${color}" --arg desc "${description}" \
+                    '{name:$name, color:$color, description:$desc}')" \
+              "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels")
+
+            ST=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
+
+            # If not created (e.g., already exists), PATCH existing label
+            if [[ "${ST}" != "201" ]]; then
+              NAME_ENC=$(jq -rn --arg x "${name}" '$x|@uri')
+              curl -s -o /dev/null -w "%{http_code}" -X PATCH \
+                -H "Authorization: Bearer ${GH_PAT}" \
                 -H "Accept: application/vnd.github+json" \
-                -d "$(jq -n --arg name "${name}" --arg color "${color}" --arg desc "${description}" \
-                      '{name:$name, color:$color, description:$desc}')" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels")
+                -H "Content-Type: application/json" \
+                -d "$(jq -n --arg new "${name}" --arg color "${color}" --arg desc "${description}" \
+                      '{new_name:$new, color:$color, description:$desc}')" \
+                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels/${NAME_ENC}" >/dev/null
+            fi
 
-              ST=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
-              if [[ "${ST}" != "201" ]]; then
-                curl -s -o /dev/null -w "%{http_code}" -X PATCH \
-                  -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-                  -d "$(jq -n --arg new "${name}" --arg color "${color}" --arg desc "${description}" \
-                        '{new_name:$new, color:$color, description:$desc}')" \
-                  "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels/${name}" >/dev/null
-              fi
-              sleep 1
-            done
+            sleep 1
+          done
 
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${next}" || "${next}" == "0" ]] && break
+          # Pagination
+          next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
+          [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
