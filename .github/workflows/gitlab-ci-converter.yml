@@ -1,4 +1,3 @@
-
 name: Mirroring (GitLab → GitHub) + Trackers migration [Production]
 
 on:
@@ -782,7 +781,6 @@ jobs:
 
           # Extract PR URL robustly (strip quotes/CRs)
           PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tr -d '"'\'' | tail -n1 || true)"
-
           if [[ -n "${PR_URL}" ]]; then
             echo "Migration complete. PR link: ${PR_URL}"
           else
