@@ -461,7 +461,7 @@ jobs:
 
               if [[ -n "${pr_num}" ]]; then
                 if [[ "${state}" == "closed" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                  curl -s -o /dev/null -w "%{http_%}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                     -d '{"state":"closed"}' "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}" >/dev/null
                 elif [[ "${state}" == "merged" ]]; then
                   curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
