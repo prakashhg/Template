@@ -1,5 +1,5 @@
 
-name: Mirroring (GitLab → GitHub) + Trackers migration
+name: Mirroring (GitLab → GitHub) + Trackers migration [Group-wide]
 
 on:
   workflow_dispatch: {}
