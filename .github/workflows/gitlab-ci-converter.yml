@@ -11,7 +11,17 @@ permissions:
   issues: write
   pull-requests: write
 
+# Common environment for all jobs (can be overridden per job)
+env:
+  # These must exist in your repo/org:
+  # secrets: GITLAB_TOKEN, GH_PAT (classic: repo+workflow)
+  # variables: GL_URL, GL_GROUP, GH_OWNER, REPO_NAME_MODE, GH_REPO_PREFIX, GH_REPO_SEPARATOR, AUTO_CREATE_REPO, INIT_IF_EMPTY_DEST, MIGRATE_MRS
+  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
+  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
+
 jobs:
+  # 1) Discover projects under the GitLab group (includes subgroups)
   discover_projects:
     name: "1) Discover GitLab projects for conversion"
     runs-on: ubuntu-latest
@@ -38,17 +48,14 @@ jobs:
           set -euo pipefail
           : "${GL_URL:?GL_URL is required}"
           : "${GL_GROUP:?GL_GROUP is required}"
-
           GL_API="${GL_URL%/}/api/v4"
-          GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')
-
+          GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x@uri')
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
 
           page=1
           filtered=()
-
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
             curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
@@ -56,8 +63,9 @@ jobs:
 
             while read -r proj; do
               path=$(jq -r '.path_with_namespace' <<< "${proj}")
-              [[ -n "${path}" ]] || continue
+              [[ -n "${path}" ]] || continue   # ✅ fix: only continue when path is empty  [1](https://capgemini-my.sharepoint.com/personal/prakash_h-g_capgemini_com).yml)
 
+              # Compute destination repo name
               if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
                 base="$(echo "${path}" | tr '/' "${GH_REPO_SEPARATOR}")"
               else
@@ -65,6 +73,7 @@ jobs:
               fi
               dest="${GH_REPO_PREFIX}${base}"
 
+              # filter out deletion-scheduled
               if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
                 echo "Exclude (deletion-scheduled): ${dest} (from GL: ${path})"
               else
@@ -80,10 +89,12 @@ jobs:
           json=$(printf '%s\n' "${filtered[@]:-}" | jq -R . | jq -s -c .)
           echo "project_list=${json}" >> "$GITHUB_OUTPUT"
 
+  # 2) Repo Migration · 1.1 Commit Sync (branches & commits) — ALL projects
   repo_migration_commit_sync_all:
     name: "2) Repo Migration · 1.1 Commit Sync (ALL projects)"
     needs: discover_projects
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -143,7 +154,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
@@ -159,7 +170,6 @@ jobs:
             echo "has_branches=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           TYPE=$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")
           if [[ "${TYPE}" != "array" ]]; then
             echo "WARN: Unexpected response type=${TYPE} – skipping mirror."
@@ -167,7 +177,6 @@ jobs:
             echo "has_branches=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           COUNT=$(jq 'length' "${RESP}")
           if [[ "${COUNT}" -ge 1 ]]; then
             echo "GitLab source has ${COUNT} branch(es)."
@@ -231,11 +240,11 @@ jobs:
           set -euo pipefail
           RESP=$(mktemp)
           if ! curl --fail-with-body -s -H "Authorization: Bearer ${GH_PAT}" \
-            "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/branches?per_page=100" > "${RESP}"; then
+               "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/branches?per_page=100" > "${RESP}"; then
             echo "ERROR: Could not list destination branches"; head -c 300 "${RESP}" || true; exit 1
           fi
           TYPE=$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")
-          [[ "${TYPE}" == "array" ]] || { echo "ERROR: Destination branch list response not array"; head -c 300 "${RESP}" || true; exit 1; }
+          [[ "${TYPE}" == "array" ]] || { echo "ERROR: Destination branch list response not array"; head -c 300 "${RESP}" || true; exit 1; }   # ✅ fix  [1](https://capgemini-my.sharepoint.com/personal/prakash_h-g_capgemini_com).yml)
           COUNT=$(jq 'length' "${RESP}")
           if [[ "${COUNT}" -lt 1 ]]; then
             echo "ERROR: No branches found in destination after mirror push."
@@ -275,15 +284,17 @@ jobs:
           [[ "${PATCH_HTTP}" == "200" ]] || echo "WARN: Could not set default_branch (HTTP ${PATCH_HTTP})."
           echo "Destination initialized with README on '${DEFAULT_BRANCH}'."
 
+  # 3) Repo Migration · 1.2 Tag Sync — ALL projects
   repo_migration_tag_sync_all:
     name: "3) Repo Migration · 1.2 Tag Sync (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       max-parallel: 6
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -292,7 +303,7 @@ jobs:
       REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-      WORKDIR: //tmp/mirror-work
+      WORKDIR: /tmp/mirror-work
     steps:
       - name: Install git
         run: |
@@ -320,14 +331,15 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${{ matrix.project }}" '$x|@uri')
+          GL_ENC=$(jq -rn --arg x "${{ matrix.project }}" '$x@uri')
           RESP=$(mktemp)
           if ! curl --fail-with-body -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1" > "${RESP}"; then
-            echo "No branches / cannot access – skipping tags"; exit 0
+               "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1" > "${RESP}"; then
+            echo "No branches / cannot access – skipping tags"
+            exit 0
           fi
-          [[ "$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")" == "array" ]] || exit 0
-          [[ "$(jq 'length' "${RESP}")" -ge 1 ]] || { echo "No branches – skipping tags"; exit 0; }
+          [[ "$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")" == "array" ]] || exit 0   # ✅ fix: only continue when array  [1](https://capgemini-my.sharepoint.com/personal/prakash_h-g_capgemini_com).yml)
+          [[ "$(jq 'length' "${RESP}")" -ge 1 ]] || { echo "No branches – skipping tags"; exit 0; }   # ✅ fix  [1](https://capgemini-my.sharepoint.com/personal/prakash_h-g_capgemini_com).yml)
 
       - name: Fetch tags from GitLab and push to GitHub
         env:
@@ -347,16 +359,18 @@ jobs:
           echo "Pushing tags..."
           git push --tags github
 
+  # 4) Repo Migration · 1.3 PR Sync (MR → PR) — ALL projects
   repo_migration_pr_sync_all:
     name: "4) Repo Migration · 1.3 PR Sync (MR → PR) (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
     if: ${{ vars.MIGRATE_MRS == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       max-parallel: 3
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -378,7 +392,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
@@ -401,10 +415,9 @@ jobs:
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
             if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/merge_requests?scope=all&per_page=100&page=${page}" > "${RESP}"; then
+                 "${GL_API}/projects/${GL_ENC}/merge_requests?scope=all&per_page=100&page=${page}" > "${RESP}"; then
               echo "ERROR: GitLab MRs API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
             fi
-
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: MRs response not array"; head -c 300 "${RESP}" || true; break; }
 
             jq -c '.[]' "${RESP}" | while IFS= read -r mr; do
@@ -418,18 +431,18 @@ jobs:
               gl_iid=$(printf '%s' "${mr}" | jq -r '.iid')
 
               HEAD_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}")
+                          "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}")
               BASE_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}")
+                          "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}")
               if [[ "${HEAD_OK}" != "200" || "${BASE_OK}" != "200" ]]; then
                 echo "Skip MR#${gl_iid}: missing head/base (${source_branch}→${target_branch})"; continue
               fi
 
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-                -d "$(jq -n --arg title "${title}" --arg body "**Imported from GitLab by @${author}**\n\n${body}" \
-                          --arg head "${source_branch}" --arg base "${target_branch}" \
-                          '{title:$title, body:$body, head:$head, base:$base}')" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls")
+                         -d "$(jq -n --arg title "${title}" --arg body "**Imported from GitLab by @${author}**\n\n${body}" \
+                             --arg head "${source_branch}" --arg base "${target_branch}" \
+                             '{title:$title, body:$body, head:$head, base:$base}')" \
+                         "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls")
               http=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
               pr_num=$(echo "${CREATE}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
               echo "PR create status=${http} number=${pr_num}"
@@ -481,15 +494,17 @@ jobs:
             page="${next}"
           done
 
+  # 5) Repo Migration · 1.4 Label Sync — ALL projects
   repo_migration_label_sync_all:
     name: "5) Repo Migration · 1.4 Label Sync (ALL projects)"
     needs: [discover_projects]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       max-parallel: 6
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -511,7 +526,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
@@ -534,14 +549,16 @@ jobs:
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
             if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/labels?per_page=100&page=${page}" > "${RESP}"; then
+                 "${GL_API}/projects/${GL_ENC}/labels?per_page=100&page=${page}" > "${RESP}"; then
               echo "ERROR: GitLab Labels API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
             fi
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: labels response not array"; head -c 300 "${RESP}" || true; break; }
+
             jq -c '.[]' "${RESP}" | while IFS= read -r lbl; do
               name=$(printf '%s' "${lbl}" | jq -r '.name')
               color=$(printf '%s' "${lbl}" | jq -r '.color' | sed 's/^#//')
               description=$(printf '%s' "${lbl}" | jq -r '.description // empty')
+
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
                 -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                 -d "$(jq -n --arg name "${name}" --arg color "${color}" --arg desc "${description}" \
@@ -549,7 +566,7 @@ jobs:
                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels")
               ST=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
               if [[ "${ST}" != "201" ]]; then
-                NAME_ENC=$(jq -rn --arg x "${name}" '$x|@uri')
+                NAME_ENC=$(jq -rn --arg x "${name}" '$x@uri')
                 curl -s -o /dev/null -w "%{http_code}" -X PATCH \
                   -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                   -d "$(jq -n --arg new "${name}" --arg color "${color}" --arg desc "${description}" \
@@ -558,20 +575,23 @@ jobs:
               fi
               sleep 1
             done
+
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
+  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects
   repo_migration_milestone_sync_all:
     name: "6) Repo Migration · 1.5 Milestone Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       max-parallel: 6
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -593,7 +613,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
@@ -616,36 +636,40 @@ jobs:
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
             if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/milestones?per_page=100&page=${page}" > "${RESP}"; then
+                 "${GL_API}/projects/${GL_ENC}/milestones?per_page=100&page=${page}" > "${RESP}"; then
               echo "ERROR: GitLab Milestones API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
             fi
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: milestones response not array"; head -c 300 "${RESP}" || true; break; }
+
             jq -c '.[]' "${RESP}" | while IFS= read -r ms; do
               title=$(printf '%s' "${ms}" | jq -r '.title')
               description=$(printf '%s' "${ms}" | jq -r '.description // empty')
               due=$(printf '%s' "${ms}" | jq -r '.due_date // empty')
               payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg due "${due}" \
-                         '{title:$title, description:$desc} + (((($due|length)>0) ? {due_on:$due} : {}))')
+                '{title:$title, description:$desc} + (((($due|length)>0) ? {due_on:$due} : {}))')
               status=$(curl -s -o /dev/null -w "%{http_code}" \
                 -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                 -d "${payload}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
               echo "Milestone ${title} status: ${status}"
               sleep 1
             done
+
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
+  # 7) GitLab CI → GitHub Actions (dry-run preview) — ALL projects
   ci_migration_dry_run:
     name: "7) ${{ matrix.project }} · GitLab CI → Actions (dry-run)"
     needs: [discover_projects, repo_migration_commit_sync_all]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       max-parallel: 4
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GH_PAT: ${{ secrets.GH_PAT }}
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
@@ -655,46 +679,22 @@ jobs:
       GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
+      GH_TOKEN: ${{ secrets.GH_PAT }}  # use PAT with workflow scope for Importer  [4](https://docs.github.com/enterprise-cloud@latest/actions/migrating-to-github-actions/using-github-actions-importer-to-automate-migrations/migrating-from-gitlab-with-github-actions-importer)
     steps:
       - name: Ensure GitHub CLI & Docker are available
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y gnupg software-properties-common
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-              | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-            sudo apt-get update -y
-            sudo apt-get install -y gh
-          fi
-          sudo apt-get install -y jq curl
-          if ! command -v docker >/dev/null 2>&1; then
-            sudo apt-get install -y docker.io
-            sudo systemctl enable --now docker
-          fi
-          docker --version
           gh --version
-
-      - name: Authenticate gh (for GHCR pulls)
-        shell: bash
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
-          gh auth status
+          docker --version || true   # no systemctl on hosted runners  [2](https://datawookie.dev/blog/2024/04/dind-in-github-actions/)
 
       - name: Install Actions Importer extension and verify
         shell: bash
         run: |
           set -euo pipefail
-          gh extension list | grep -q '^github/gh-actions-importer' || \
-            gh extension install github/gh-actions-importer
+          gh extension list | grep -q '^github/gh-actions-importer' || gh extension install github/gh-actions-importer
           gh actions-importer -h
-          gh actions-importer update
+          gh actions-importer update || true
 
       - name: Compute destination repo name
         id: repo
@@ -761,20 +761,22 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
+  # 8) GitLab CI → GitHub Actions (migrate: open PR)
   ci_migration_migrate:
     name: "8) ${{ matrix.project }} · GitLab CI → Actions (migrate, stop when PR raised)"
     needs: [discover_projects, repo_migration_commit_sync_all]
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       max-parallel: 3
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     permissions:
       contents: write
       pull-requests: write
     env:
-      GH_PAT: ${{ secrets.GH_PAT }}
+      GH_PAT: ${{ secrets.GH_PAT }}      # PAT classic with repo+workflow scopes  [4](https://docs.github.com/enterprise-cloud@latest/actions/migrating-to-github-actions/using-github-actions-importer-to-automate-migrations/migrating-from-gitlab-with-github-actions-importer)
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL: ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
@@ -782,45 +784,21 @@ jobs:
       GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
+      GH_TOKEN: ${{ secrets.GH_PAT }}    # for gh CLI usage  [3](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-github-cli)
     steps:
       - name: Ensure GitHub CLI & Docker
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y gnupg software-properties-common
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-              | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-            sudo apt-get update -y
-            sudo apt-get install -y gh
-          fi
-          sudo apt-get install -y jq curl
-          if ! command -v docker >/dev/null 2>&1; then
-            sudo apt-get install -y docker.io
-            sudo systemctl enable --now docker
-          fi
-          docker --version
           gh --version
-
-      - name: Authenticate gh
-        shell: bash
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
-          gh auth status
+          docker --version || true
 
       - name: Install / update Actions Importer extension
         shell: bash
         run: |
           set -euo pipefail
-          gh extension list | grep -q '^github/gh-actions-importer' || \
-            gh extension install github/gh-actions-importer
-          gh actions-importer update
+          gh extension list | grep -q '^github/gh-actions-importer' || gh extension install github/gh-actions-importer
+          gh actions-importer update || true
 
       - name: Compute destination repo name
         id: repo
@@ -897,6 +875,7 @@ jobs:
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+          # Wait for branches to appear (mirror job may still be pushing)
           for i in {1..30}; do
             BR_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")
             BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
@@ -940,16 +919,21 @@ jobs:
             --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
           MIGRATE_RC=${PIPESTATUS[0]}
           set -e
-          PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tail -n1 || true)"
+
+          # Extract PR URL robustly
+          PR_URL="$(grep -Eo 'https://github.com/[^ ]+/pull/[0-9]+' "${LOG_FILE}" | tail -n1 || true)"   # ✅ fix  [1](https://capgemini-my.sharepoint.com/personal/prakash_h-g_capgemini_com).yml)
           if [[ -n "${PR_URL}" ]]; then
             echo "::notice::PR opened: ${PR_URL}"
             echo "migration_pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # If migrate succeeded but produced no PR (e.g., no changes), still mark green
           if [[ "${MIGRATE_RC}" -eq 0 ]]; then
             echo "::notice::No PR created (possibly no changes needed). Marking job successful."
             exit 0
           fi
+
           echo "ERROR: Migration failed (exit ${MIGRATE_RC})."
           head -n 100 "${LOG_FILE}" || true
           exit "${MIGRATE_RC}"
