@@ -12,7 +12,6 @@ permissions:
   pull-requests: write
 
 jobs:
-  # 1) Discover projects under the GitLab group (includes subgroups)
   discover_projects:
     name: "1) Discover GitLab projects for conversion"
     runs-on: ubuntu-latest
@@ -59,7 +58,6 @@ jobs:
               path=$(jq -r '.path_with_namespace' <<< "${proj}")
               [[ -n "${path}" ]] || continue
 
-              # Compute destination repo name for filtering by naming convention
               if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
                 base="$(echo "${path}" | tr '/' "${GH_REPO_SEPARATOR}")"
               else
@@ -82,7 +80,6 @@ jobs:
           json=$(printf '%s\n' "${filtered[@]:-}" | jq -R . | jq -s -c .)
           echo "project_list=${json}" >> "$GITHUB_OUTPUT"
 
-  # 2) Repo Migration · 1.1 Commit Sync (branches & commits) — ALL projects
   repo_migration_commit_sync_all:
     name: "2) Repo Migration · 1.1 Commit Sync (ALL projects)"
     needs: discover_projects
@@ -120,14 +117,12 @@ jobs:
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
-
           if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
             base="$(echo "${GL_PROJECT}" | tr '/' "${GH_REPO_SEPARATOR}")"
           else
             base="${GL_PROJECT##*/}"
           fi
           GH_REPO="${GH_REPO_PREFIX}${base}"
-
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
           echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
@@ -214,21 +209,17 @@ jobs:
           set -euo pipefail
           mkdir -p "${WORKDIR}"
           cd "${WORKDIR}"
-
           HOST="${GL_URL#*://}"
           SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${{ matrix.project }}.git"
           echo "Cloning --mirror from ${GL_URL}/${{ matrix.project }}"
           git clone --mirror "${SRC_URL}" src.git
           echo "Local refs preview:"; git -C src.git show-ref | head -n 20 || true
-
           cd src.git
           PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
           git remote remove github 2>/dev/null || true
           git remote add github "${PUSH_URL}"
-
           echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
           git push --mirror github
-
           git lfs fetch --all || true
           git lfs push --all github || true
 
@@ -243,10 +234,8 @@ jobs:
             "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/branches?per_page=100" > "${RESP}"; then
             echo "ERROR: Could not list destination branches"; head -c 300 "${RESP}" || true; exit 1
           fi
-
           TYPE=$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")
           [[ "${TYPE}" == "array" ]] || { echo "ERROR: Destination branch list response not array"; head -c 300 "${RESP}" || true; exit 1; }
-
           COUNT=$(jq 'length' "${RESP}")
           if [[ "${COUNT}" -lt 1 ]]; then
             echo "ERROR: No branches found in destination after mirror push."
@@ -270,10 +259,8 @@ jobs:
                "${GL_API}/projects/${GL_ENC}" > "${PINFO}"; then
             DEFAULT_BRANCH=$(jq -r '.default_branch // "main"' "${PINFO}")
           fi
-
           echo "Initializing destination with a README on branch '${DEFAULT_BRANCH}'..."
           CONTENT=$(printf '# %s\n\nInitialized because GitLab source contained no branches.\n' "${GH_REPO}" | base64 -w0)
-
           PUT_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
             -X PUT -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
             -d "$(jq -n --arg msg "Initialize ${DEFAULT_BRANCH}" --arg content "${CONTENT}" --arg branch "${DEFAULT_BRANCH}" \
@@ -281,16 +268,13 @@ jobs:
             "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/README.md")
           HTTP=$(echo "${PUT_RESP}" | sed -n 's/^HTTP_STATUS://p')
           [[ "${HTTP}" == "201" || "${HTTP}" == "200" ]] || { echo "ERROR: Failed to initialize repository (HTTP ${HTTP})."; exit 1; }
-
           PATCH_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
             -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
             -d "{\"default_branch\":\"${DEFAULT_BRANCH}\"}" \
             "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}")
           [[ "${PATCH_HTTP}" == "200" ]] || echo "WARN: Could not set default_branch (HTTP ${PATCH_HTTP})."
-
           echo "Destination initialized with README on '${DEFAULT_BRANCH}'."
 
-  # 3) Repo Migration · 1.2 Tag Sync — ALL projects
   repo_migration_tag_sync_all:
     name: "3) Repo Migration · 1.2 Tag Sync (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -298,8 +282,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -308,7 +292,7 @@ jobs:
       REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-      WORKDIR: /tmp/mirror-work
+      WORKDIR: //tmp/mirror-work
     steps:
       - name: Install git
         run: |
@@ -363,7 +347,6 @@ jobs:
           echo "Pushing tags..."
           git push --tags github
 
-  # 4) Repo Migration · 1.3 PR Sync (MR → PR) — ALL projects
   repo_migration_pr_sync_all:
     name: "4) Repo Migration · 1.3 PR Sync (MR → PR) (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -372,8 +355,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 3
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -398,7 +381,6 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
@@ -408,7 +390,6 @@ jobs:
             base="${GL_PROJECT##*/}"
           fi
           GH_REPO="${GH_REPO_PREFIX}${base}"
-
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
 
       - name: Migrate merge requests → pull requests
@@ -461,7 +442,7 @@ jobs:
 
               if [[ -n "${pr_num}" ]]; then
                 if [[ "${state}" == "closed" ]]; then
-                  curl -s -o /dev/null -w "%{http_%}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                     -d '{"state":"closed"}' "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}" >/dev/null
                 elif [[ "${state}" == "merged" ]]; then
                   curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
@@ -500,7 +481,6 @@ jobs:
             page="${next}"
           done
 
-  # 5) Repo Migration · 1.4 Label Sync — ALL projects
   repo_migration_label_sync_all:
     name: "5) Repo Migration · 1.4 Label Sync (ALL projects)"
     needs: [discover_projects]
@@ -508,8 +488,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -534,7 +514,6 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
@@ -558,21 +537,17 @@ jobs:
               "${GL_API}/projects/${GL_ENC}/labels?per_page=100&page=${page}" > "${RESP}"; then
               echo "ERROR: GitLab Labels API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
             fi
-
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: labels response not array"; head -c 300 "${RESP}" || true; break; }
-
             jq -c '.[]' "${RESP}" | while IFS= read -r lbl; do
               name=$(printf '%s' "${lbl}" | jq -r '.name')
               color=$(printf '%s' "${lbl}" | jq -r '.color' | sed 's/^#//')
               description=$(printf '%s' "${lbl}" | jq -r '.description // empty')
-
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
                 -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                 -d "$(jq -n --arg name "${name}" --arg color "${color}" --arg desc "${description}" \
                       '{name:$name, color:$color, description:$desc}')" \
                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels")
               ST=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
-
               if [[ "${ST}" != "201" ]]; then
                 NAME_ENC=$(jq -rn --arg x "${name}" '$x|@uri')
                 curl -s -o /dev/null -w "%{http_code}" -X PATCH \
@@ -583,13 +558,11 @@ jobs:
               fi
               sleep 1
             done
-
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
-  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects
   repo_migration_milestone_sync_all:
     name: "6) Repo Migration · 1.5 Milestone Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all]
@@ -597,8 +570,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT: ${{ secrets.GH_PAT }}
@@ -623,7 +596,6 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
@@ -647,30 +619,24 @@ jobs:
               "${GL_API}/projects/${GL_ENC}/milestones?per_page=100&page=${page}" > "${RESP}"; then
               echo "ERROR: GitLab Milestones API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
             fi
-
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: milestones response not array"; head -c 300 "${RESP}" || true; break; }
-
             jq -c '.[]' "${RESP}" | while IFS= read -r ms; do
               title=$(printf '%s' "${ms}" | jq -r '.title')
               description=$(printf '%s' "${ms}" | jq -r '.description // empty')
               due=$(printf '%s' "${ms}" | jq -r '.due_date // empty')
-
               payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg due "${due}" \
                          '{title:$title, description:$desc} + (((($due|length)>0) ? {due_on:$due} : {}))')
-
               status=$(curl -s -o /dev/null -w "%{http_code}" \
                 -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                 -d "${payload}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
               echo "Milestone ${title} status: ${status}"
               sleep 1
             done
-
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
-  # 7) GitLab CI → GitHub Actions (dry-run preview) — ALL projects
   ci_migration_dry_run:
     name: "7) ${{ matrix.project }} · GitLab CI → Actions (dry-run)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -678,8 +644,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GH_PAT: ${{ secrets.GH_PAT }}
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
@@ -795,7 +761,6 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
-  # 8) GitLab CI → GitHub Actions (migrate production: open PR) — ALL projects
   ci_migration_migrate:
     name: "8) ${{ matrix.project }} · GitLab CI → Actions (migrate, stop when PR raised)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -803,13 +768,13 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 3
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     permissions:
       contents: write
       pull-requests: write
     env:
-      GH_PAT: ${{ secrets.GH_PAT }} # PAT classic with repo+workflow scopes
+      GH_PAT: ${{ secrets.GH_PAT }}
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL: ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
@@ -932,8 +897,6 @@ jobs:
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
-
-          # Wait for branches to appear (mirror job may still be pushing)
           for i in {1..30}; do
             BR_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")
             BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
@@ -944,14 +907,11 @@ jobs:
             echo "No branches yet; waiting... (${i}/30)"
             sleep 3
           done
-
           BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
           [[ "${BR_LEN}" -lt 1 ]] && { echo "ERROR: No branches found after waiting. Mirror push may have failed or dest uninitialized."; exit 1; }
-
           CURRENT_DEFAULT=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')
           FIRST_BRANCH=$(jq -r '.[0].name' <<< "${BR_LIST}")
           HAS_DEFAULT=$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")
-
           if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
             echo "Updating default branch to '${FIRST_BRANCH}' (existing branch)."
             UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
@@ -972,8 +932,6 @@ jobs:
           set -euo pipefail
           mkdir -p "tmp/migrate/${GH_REPO}"
           LOG_FILE="$(mktemp)"
-
-          # Run migrate and capture the actual exit code of 'gh' (not tee)
           set +e
           gh actions-importer migrate gitlab \
             --target-url "https://github.com/${GH_OWNER}/${GH_REPO}" \
@@ -982,23 +940,16 @@ jobs:
             --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
           MIGRATE_RC=${PIPESTATUS[0]}
           set -e
-
-          # Extract PR URL from logs
           PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tail -n1 || true)"
           if [[ -n "${PR_URL}" ]]; then
             echo "::notice::PR opened: ${PR_URL}"
             echo "migration_pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
-            # ✅ Mark the job successful and stop right away
             exit 0
           fi
-
-          # If migrate succeeded but produced no PR (e.g., no changes), still mark green
           if [[ "${MIGRATE_RC}" -eq 0 ]]; then
             echo "::notice::No PR created (possibly no changes needed). Marking job successful."
             exit 0
           fi
-
-          # Otherwise, fail the job and show context
           echo "ERROR: Migration failed (exit ${MIGRATE_RC})."
           head -n 100 "${LOG_FILE}" || true
           exit "${MIGRATE_RC}"
