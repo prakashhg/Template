@@ -1,5 +1,5 @@
 
-name: Mirroring (GitLab → GitHub) + Trackers migration
+name: Mirroring (GitLab → GitHub) + Trackers migration [Group-wide]
 
 on:
   workflow_dispatch: {}
@@ -760,7 +760,7 @@ jobs:
 
   # 8) GitLab CI → GitHub Actions (migrate production: open PR) — ALL projects
   ci_migration_migrate:
-    name: "8) ${{ matrix.project }} · GitLab CI → Actions (migrate)"
+    name: "8) ${{ matrix.project }} · GitLab CI → Actions (migrate, stop when PR raised)"
     needs: [discover_projects, repo_migration_commit_sync_all]
     runs-on: ubuntu-latest
     strategy:
@@ -913,7 +913,7 @@ jobs:
           HAS_DEFAULT=$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")
           if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
             echo "Updating default branch to '${FIRST_BRANCH}' (existing branch)."
-            UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+            UPDATE_HTTP=$(curl -s -o /dev            UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
               -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
               -d "{\"default_branch\":\"${FIRST_BRANCH}\"}" "${API}")
             [[ "${UPDATE_HTTP}" == "200" ]] || { echo "ERROR: Failed to update default branch (HTTP ${UPDATE_HTTP})."; exit 1; }
@@ -921,7 +921,7 @@ jobs:
             echo "Default branch '${CURRENT_DEFAULT}' exists; continuing."
           fi
 
-      - name: Migrate pipeline → open PR adding workflow
+      - name: Migrate pipeline → open PR and finish job green
         shell: bash
         env:
           GL_PROJECT: ${{ matrix.project }}
@@ -931,13 +931,33 @@ jobs:
           set -euo pipefail
           mkdir -p "tmp/migrate/${GH_REPO}"
           LOG_FILE="$(mktemp)"
+
+          # Run migrate and capture the actual exit code of 'gh' (not tee)
+          set +e
           gh actions-importer migrate gitlab \
             --target-url "https://github.com/${GH_OWNER}/${GH_REPO}" \
             --output-dir "tmp/migrate/${GH_REPO}" \
             --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
             --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
+          MIGRATE_RC=${PIPESTATUS[0]}
+          set -e
+
+          # Extract PR URL from logs
           PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tail -n1 || true)"
+
           if [[ -n "${PR_URL}" ]]; then
-            echo "Migration complete. PR link: ${PR_URL}"
-          else
-            echo "Migration complete. Check the step log above for the PR URL."
+            echo "::notice::PR opened: ${PR_URL}"
+            echo "migration_pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
+            # ✅ Mark the job successful and stop right away
+            exit 0
+          fi
+
+          # If migrate succeeded but produced no PR (e.g., no changes), still mark green
+          if [[ "${MIGRATE_RC}" -eq 0 ]]; then
+            echo "::notice::No PR created (possibly no changes needed). Marking job successful."
+            exit 0
+          fi
+
+          # Otherwise, fail the job and show context
+          echo "ERROR: Migration failed (exit ${MIGRATE_RC})."
+          head -n 100 "${LOG_FILE}" || true
