@@ -1,4 +1,27 @@
 
+# .github/workflows/gitlab-group-migration.yml
+# Group‑wide GitLab → GitHub migration:
+#  - Discovers all projects in a GitLab group (incl. subgroups)
+#  - Mirrors branches/commits and tags
+#  - Migrates MRs → PRs, labels, milestones
+#  - Converts GitLab CI → GitHub Actions (dry‑run + migrate PR)
+#  - No deletions; safe to re‑run; skips inaccessible/deleted projects
+#
+# Prereqs (Repository → Settings → Secrets and variables):
+#   Secrets:
+#     - GITLAB_TOKEN        (scopes: read_api, read_repository)
+#     - GH_PAT              (GitHub PAT classic: repo, workflow)
+#   Variables:
+#     - GL_URL=https://gitlab.com
+#     - GL_GROUP=<your-group>                 e.g., prakashguruswamy24-group
+#     - GH_OWNER=<github-user-or-org>         e.g., prakashhg
+#     - REPO_NAME_MODE=path                   or fullpath
+#     - GH_REPO_PREFIX=                       optional (e.g., gl-)
+#     - GH_REPO_SEPARATOR=-                   used when REPO_NAME_MODE=fullpath
+#     - AUTO_CREATE_REPO=true
+#     - MIGRATE_MRS=true
+#     - INIT_IF_EMPTY_DEST=false
+
 name: Mirroring (GitLab → GitHub) + Trackers migration [Group-wide]
 
 on:
@@ -743,7 +766,7 @@ jobs:
           set -euo pipefail
           mkdir -p "tmp/dry-run/${GH_REPO}"
           gh actions-importer dry-run gitlab \
-            --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
+            --namespace "${GL_GROUP:-${GL_PROJECT%/*]}" \
             --project "${GL_PROJECT##*/}" \
             --output-dir "tmp/dry-run/${GH_REPO}"
           echo "Converted workflow files are in tmp/dry-run/${GH_REPO}"
@@ -759,6 +782,7 @@ jobs:
           include-hidden-files: false
 
   # 8) GitLab CI → GitHub Actions (migrate production: open PR) — ALL projects
+  #    This job finishes green as soon as a PR is raised (or if no changes were needed).
   ci_migration_migrate:
     name: "8) ${{ matrix.project }} · GitLab CI → Actions (migrate, stop when PR raised)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -893,7 +917,9 @@ jobs:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
+
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+
           # Wait for branches to appear (mirror job may still be pushing)
           for i in {1..30}; do
             BR_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")
@@ -905,15 +931,27 @@ jobs:
             echo "No branches yet; waiting... (${i}/30)"
             sleep 3
           done
+
           BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
           [[ "${BR_LEN}" -lt 1 ]] && { echo "ERROR: No branches found after waiting. Mirror push may have failed or dest uninitialized."; exit 1; }
 
+          # Prefer 'main' or 'master' if present; otherwise take the first branch
+          FIRST_BRANCH=$(
+            jq -r '
+              [.[].name] as $names
+              | if ($names | any(.=="main")) then "main"
+                elif ($names | any(.=="master")) then "master"
+                else (.[0].name)
+                end
+            ' <<< "${BR_LIST}"
+          )
+
           CURRENT_DEFAULT=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')
-          FIRST_BRANCH=$(jq -r '.[0].name' <<< "${BR_LIST}")
           HAS_DEFAULT=$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")
+
           if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
             echo "Updating default branch to '${FIRST_BRANCH}' (existing branch)."
-            UPDATE_HTTP=$(curl -s -o /dev            UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+            UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
               -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
               -d "{\"default_branch\":\"${FIRST_BRANCH}\"}" "${API}")
             [[ "${UPDATE_HTTP}" == "200" ]] || { echo "ERROR: Failed to update default branch (HTTP ${UPDATE_HTTP})."; exit 1; }
@@ -932,12 +970,12 @@ jobs:
           mkdir -p "tmp/migrate/${GH_REPO}"
           LOG_FILE="$(mktemp)"
 
-          # Run migrate and capture the actual exit code of 'gh' (not tee)
+          # Run migrate and capture the actual exit code of 'gh' (even with tee)
           set +e
           gh actions-importer migrate gitlab \
             --target-url "https://github.com/${GH_OWNER}/${GH_REPO}" \
             --output-dir "tmp/migrate/${GH_REPO}" \
-            --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
+            --namespace "${GL_GROUP:-${GL_PROJECT%/*]}" \
             --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
           MIGRATE_RC=${PIPESTATUS[0]}
           set -e
@@ -948,7 +986,7 @@ jobs:
           if [[ -n "${PR_URL}" ]]; then
             echo "::notice::PR opened: ${PR_URL}"
             echo "migration_pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
-            # ✅ Mark the job successful and stop right away
+            # ✅ Mark the job successful and stop immediately
             exit 0
           fi
 
@@ -961,3 +999,4 @@ jobs:
           # Otherwise, fail the job and show context
           echo "ERROR: Migration failed (exit ${MIGRATE_RC})."
           head -n 100 "${LOG_FILE}" || true
+          exit 1
