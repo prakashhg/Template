@@ -15,7 +15,7 @@ jobs:
   # 1) Discover projects under the GitLab group (includes subgroups)
   discover_projects:
     name: "1) Discover GitLab projects for conversion"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       project_list: ${{ steps.collect.outputs.project_list }}
     env:
@@ -84,7 +84,7 @@ jobs:
   repo_migration_commit_sync_all:
     name: "2) Repo Migration · 1.1 Commit Sync (ALL projects)"
     needs: discover_projects
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -278,7 +278,7 @@ jobs:
   repo_migration_tag_sync_all:
     name: "3) Repo Migration · 1.2 Tag Sync (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -352,7 +352,7 @@ jobs:
     name: "4) Repo Migration · 1.3 PR Sync (MR → PR) (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
     if: ${{ vars.MIGRATE_MRS == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -487,7 +487,7 @@ jobs:
   repo_migration_label_sync_all:
     name: "5) Repo Migration · 1.4 Label Sync (ALL projects)"
     needs: [discover_projects]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -574,7 +574,7 @@ jobs:
   repo_migration_milestone_sync_all:
     name: "6) Repo Migration · 1.5 Milestone Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 6
@@ -652,7 +652,7 @@ jobs:
   ci_migration_dry_run:
     name: "7) ${{ matrix.project }} · GitLab CI → Actions (dry-run)"
     needs: [discover_projects, repo_migration_commit_sync_all]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -691,8 +691,7 @@ jobs:
 
       - name: Authenticate gh (for GHCR pulls)
         shell: bash
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+        env: { GH_PAT: ${{ secrets.GH_PAT }} }
         run: |
           set -euo pipefail
           echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
@@ -727,8 +726,7 @@ jobs:
 
       - name: Skip if destination repo is deletion-scheduled
         shell: bash
-        env:
-          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
         run: |
           set -euo pipefail
           if [[ "${GH_REPO}" == deletion_scheduled-* || "${GH_REPO}" == *deletion_scheduled-* ]]; then
@@ -775,7 +773,7 @@ jobs:
   ci_migration_migrate:
     name: "8) ${{ matrix.project }} · GitLab CI → Actions (migrate)"
     needs: [discover_projects, repo_migration_commit_sync_all]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -817,8 +815,7 @@ jobs:
 
       - name: Authenticate gh
         shell: bash
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+        env: { GH_PAT: ${{ secrets.GH_PAT }} }
         run: |
           set -euo pipefail
           echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
@@ -852,8 +849,7 @@ jobs:
 
       - name: Skip if destination repo is deletion-scheduled
         shell: bash
-        env:
-          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
         run: |
           set -euo pipefail
           if [[ "${GH_REPO}" == deletion_scheduled-* || "${GH_REPO}" == *deletion_scheduled-* ]]; then
@@ -874,8 +870,7 @@ jobs:
 
       - name: Ensure destination repo exists (create if missing)
         shell: bash
-        env:
-          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
@@ -901,8 +896,7 @@ jobs:
 
       - name: Ensure default branch points to an existing branch
         shell: bash
-        env:
-          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
