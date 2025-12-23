@@ -39,14 +39,17 @@ jobs:
           set -euo pipefail
           : "${GL_URL:?GL_URL is required}"
           : "${GL_GROUP:?GL_GROUP is required}"
+
           GL_API="${GL_URL%/}/api/v4"
           GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')
+
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
 
           page=1
           filtered=()
+
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
             curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
@@ -117,12 +120,14 @@ jobs:
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
+
           if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
             base="$(echo "${GL_PROJECT}" | tr '/' "${GH_REPO_SEPARATOR}")"
           else
             base="${GL_PROJECT##*/}"
           fi
           GH_REPO="${GH_REPO_PREFIX}${base}"
+
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
           echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
@@ -153,12 +158,13 @@ jobs:
           set -euo pipefail
           RESP=$(mktemp)
           if ! curl --fail-with-body -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-            "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1" > "${RESP}"; then
+               "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1" > "${RESP}"; then
             echo "WARN: Could not list branches for '${{ matrix.project }}' – skipping mirror."
             head -c 300 "${RESP}" || true
             echo "has_branches=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
           TYPE=$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")
           if [[ "${TYPE}" != "array" ]]; then
             echo "WARN: Unexpected response type=${TYPE} – skipping mirror."
@@ -166,6 +172,7 @@ jobs:
             echo "has_branches=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
           COUNT=$(jq 'length' "${RESP}")
           if [[ "${COUNT}" -ge 1 ]]; then
             echo "GitLab source has ${COUNT} branch(es)."
@@ -207,17 +214,21 @@ jobs:
           set -euo pipefail
           mkdir -p "${WORKDIR}"
           cd "${WORKDIR}"
+
           HOST="${GL_URL#*://}"
           SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${{ matrix.project }}.git"
           echo "Cloning --mirror from ${GL_URL}/${{ matrix.project }}"
           git clone --mirror "${SRC_URL}" src.git
           echo "Local refs preview:"; git -C src.git show-ref | head -n 20 || true
+
           cd src.git
           PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
           git remote remove github 2>/dev/null || true
           git remote add github "${PUSH_URL}"
+
           echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
           git push --mirror github
+
           git lfs fetch --all || true
           git lfs push --all github || true
 
@@ -232,8 +243,10 @@ jobs:
             "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/branches?per_page=100" > "${RESP}"; then
             echo "ERROR: Could not list destination branches"; head -c 300 "${RESP}" || true; exit 1
           fi
+
           TYPE=$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")
           [[ "${TYPE}" == "array" ]] || { echo "ERROR: Destination branch list response not array"; head -c 300 "${RESP}" || true; exit 1; }
+
           COUNT=$(jq 'length' "${RESP}")
           if [[ "${COUNT}" -lt 1 ]]; then
             echo "ERROR: No branches found in destination after mirror push."
@@ -254,11 +267,13 @@ jobs:
           DEFAULT_BRANCH="main"
           PINFO=$(mktemp)
           if curl --fail-with-body -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-            "${GL_API}/projects/${GL_ENC}" > "${PINFO}"; then
+               "${GL_API}/projects/${GL_ENC}" > "${PINFO}"; then
             DEFAULT_BRANCH=$(jq -r '.default_branch // "main"' "${PINFO}")
           fi
+
           echo "Initializing destination with a README on branch '${DEFAULT_BRANCH}'..."
           CONTENT=$(printf '# %s\n\nInitialized because GitLab source contained no branches.\n' "${GH_REPO}" | base64 -w0)
+
           PUT_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
             -X PUT -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
             -d "$(jq -n --arg msg "Initialize ${DEFAULT_BRANCH}" --arg content "${CONTENT}" --arg branch "${DEFAULT_BRANCH}" \
@@ -266,11 +281,13 @@ jobs:
             "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/README.md")
           HTTP=$(echo "${PUT_RESP}" | sed -n 's/^HTTP_STATUS://p')
           [[ "${HTTP}" == "201" || "${HTTP}" == "200" ]] || { echo "ERROR: Failed to initialize repository (HTTP ${HTTP})."; exit 1; }
+
           PATCH_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
             -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
             -d "{\"default_branch\":\"${DEFAULT_BRANCH}\"}" \
             "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}")
           [[ "${PATCH_HTTP}" == "200" ]] || echo "WARN: Could not set default_branch (HTTP ${PATCH_HTTP})."
+
           echo "Destination initialized with README on '${DEFAULT_BRANCH}'."
 
   # 3) Repo Migration · 1.2 Tag Sync — ALL projects
@@ -322,7 +339,7 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${{ matrix.project }}" '$x|@uri')
           RESP=$(mktemp)
           if ! curl --fail-with-body -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-            "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1" > "${RESP}"; then
+              "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1" > "${RESP}"; then
             echo "No branches / cannot access – skipping tags"; exit 0
           fi
           [[ "$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")" == "array" ]] || exit 0
@@ -381,6 +398,7 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
+
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
@@ -390,6 +408,7 @@ jobs:
             base="${GL_PROJECT##*/}"
           fi
           GH_REPO="${GH_REPO_PREFIX}${base}"
+
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
 
       - name: Migrate merge requests → pull requests
@@ -404,7 +423,9 @@ jobs:
               "${GL_API}/projects/${GL_ENC}/merge_requests?scope=all&per_page=100&page=${page}" > "${RESP}"; then
               echo "ERROR: GitLab MRs API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
             fi
+
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: MRs response not array"; head -c 300 "${RESP}" || true; break; }
+
             jq -c '.[]' "${RESP}" | while IFS= read -r mr; do
               title=$(printf '%s' "${mr}" | jq -r '.title')
               body=$(printf '%s' "${mr}" | jq -r '.description // ""')
@@ -416,9 +437,9 @@ jobs:
               gl_iid=$(printf '%s' "${mr}" | jq -r '.iid')
 
               HEAD_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}")
+                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}")
               BASE_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}")
+                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}")
               if [[ "${HEAD_OK}" != "200" || "${BASE_OK}" != "200" ]]; then
                 echo "Skip MR#${gl_iid}: missing head/base (${source_branch}→${target_branch})"; continue
               fi
@@ -440,7 +461,7 @@ jobs:
 
               if [[ -n "${pr_num}" ]]; then
                 if [[ "${state}" == "closed" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                  curl -s -o /dev/null -w "%{http_%}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                     -d '{"state":"closed"}' "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}" >/dev/null
                 elif [[ "${state}" == "merged" ]]; then
                   curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
@@ -454,10 +475,11 @@ jobs:
               while true; do
                 CRESP=$(mktemp) ; CHDR=$(mktemp)
                 if ! curl --fail-with-body -s -D "${CHDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-                  "${GL_API}/projects/${GL_ENC}/merge_requests/${gl_iid}/notes?activity_filter=only_comments&per_page=100&page=${cpage}" > "${CRESP}"; then
+                     "${GL_API}/projects/${GL_ENC}/merge_requests/${gl_iid}/notes?activity_filter=only_comments&per_page=100&page=${cpage}" > "${CRESP}"; then
                   echo "WARN: MR comments non-2xx for MR#${gl_iid} page ${cpage}"; head -c 300 "${CRESP}" || true; break
                 fi
                 [[ "$(jq -r 'type' "${CRESP}")" == "array" ]] || { echo "WARN: comments response not array"; head -c 300 "${CRESP}" || true; break; }
+
                 jq -c '.[]' "${CRESP}" | while IFS= read -r note; do
                   nbody=$(printf '%s' "${note}" | jq -r '.body')
                   nauth=$(printf '%s' "${note}" | jq -r '.author.username')
@@ -466,11 +488,13 @@ jobs:
                     "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/comments" >/dev/null
                   sleep 1
                 done
+
                 nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${CHDR}" | tr -d '\r')
                 [[ -z "${nnext}" || "${nnext}" == "0" ]] && break
                 cpage="${nnext}"
               done
             done
+
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
@@ -510,6 +534,7 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
+
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
@@ -533,17 +558,21 @@ jobs:
               "${GL_API}/projects/${GL_ENC}/labels?per_page=100&page=${page}" > "${RESP}"; then
               echo "ERROR: GitLab Labels API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
             fi
+
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: labels response not array"; head -c 300 "${RESP}" || true; break; }
+
             jq -c '.[]' "${RESP}" | while IFS= read -r lbl; do
               name=$(printf '%s' "${lbl}" | jq -r '.name')
               color=$(printf '%s' "${lbl}" | jq -r '.color' | sed 's/^#//')
               description=$(printf '%s' "${lbl}" | jq -r '.description // empty')
+
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
                 -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                 -d "$(jq -n --arg name "${name}" --arg color "${color}" --arg desc "${description}" \
                       '{name:$name, color:$color, description:$desc}')" \
                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels")
               ST=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
+
               if [[ "${ST}" != "201" ]]; then
                 NAME_ENC=$(jq -rn --arg x "${name}" '$x|@uri')
                 curl -s -o /dev/null -w "%{http_code}" -X PATCH \
@@ -554,6 +583,7 @@ jobs:
               fi
               sleep 1
             done
+
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
@@ -593,6 +623,7 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
+
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           GH_REPO_SEPARATOR="${GH_REPO_SEPARATOR:-"-"}"
@@ -616,19 +647,24 @@ jobs:
               "${GL_API}/projects/${GL_ENC}/milestones?per_page=100&page=${page}" > "${RESP}"; then
               echo "ERROR: GitLab Milestones API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
             fi
+
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: milestones response not array"; head -c 300 "${RESP}" || true; break; }
+
             jq -c '.[]' "${RESP}" | while IFS= read -r ms; do
               title=$(printf '%s' "${ms}" | jq -r '.title')
               description=$(printf '%s' "${ms}" | jq -r '.description // empty')
               due=$(printf '%s' "${ms}" | jq -r '.due_date // empty')
+
               payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg due "${due}" \
-                '{title:$title, description:$desc} + (((($due|length)>0) ? {due_on:$due} : {}))')
+                         '{title:$title, description:$desc} + (((($due|length)>0) ? {due_on:$due} : {}))')
+
               status=$(curl -s -o /dev/null -w "%{http_code}" \
                 -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                 -d "${payload}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
               echo "Milestone ${title} status: ${status}"
               sleep 1
             done
+
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
@@ -663,8 +699,8 @@ jobs:
             sudo apt-get install -y gnupg software-properties-common
             curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
             sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
-              sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
             sudo apt-get update -y
             sudo apt-get install -y gh
           fi
@@ -689,7 +725,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh extension list | grep -q '^github/gh-actions-importer' || gh extension install github/gh-actions-importer
+          gh extension list | grep -q '^github/gh-actions-importer' || \
+            gh extension install github/gh-actions-importer
           gh actions-importer -h
           gh actions-importer update
 
@@ -772,7 +809,7 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      GH_PAT: ${{ secrets.GH_PAT }}     # PAT classic with repo+workflow scopes
+      GH_PAT: ${{ secrets.GH_PAT }} # PAT classic with repo+workflow scopes
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL: ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
@@ -790,8 +827,8 @@ jobs:
             sudo apt-get install -y gnupg software-properties-common
             curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
             sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
-              sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
             sudo apt-get update -y
             sudo apt-get install -y gh
           fi
@@ -816,7 +853,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh extension list | grep -q '^github/gh-actions-importer' || gh extension install github/gh-actions-importer
+          gh extension list | grep -q '^github/gh-actions-importer' || \
+            gh extension install github/gh-actions-importer
           gh actions-importer update
 
       - name: Compute destination repo name
@@ -894,6 +932,7 @@ jobs:
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+
           # Wait for branches to appear (mirror job may still be pushing)
           for i in {1..30}; do
             BR_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")
@@ -905,15 +944,17 @@ jobs:
             echo "No branches yet; waiting... (${i}/30)"
             sleep 3
           done
+
           BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
           [[ "${BR_LEN}" -lt 1 ]] && { echo "ERROR: No branches found after waiting. Mirror push may have failed or dest uninitialized."; exit 1; }
 
           CURRENT_DEFAULT=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')
           FIRST_BRANCH=$(jq -r '.[0].name' <<< "${BR_LIST}")
           HAS_DEFAULT=$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")
+
           if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
             echo "Updating default branch to '${FIRST_BRANCH}' (existing branch)."
-            UPDATE_HTTP=$(curl -s -o /dev            UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+            UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
               -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
               -d "{\"default_branch\":\"${FIRST_BRANCH}\"}" "${API}")
             [[ "${UPDATE_HTTP}" == "200" ]] || { echo "ERROR: Failed to update default branch (HTTP ${UPDATE_HTTP})."; exit 1; }
@@ -944,7 +985,6 @@ jobs:
 
           # Extract PR URL from logs
           PR_URL="$(grep -Eo 'https://github.com/.+/pull/[0-9]+' "${LOG_FILE}" | tr -d $'\r' | tail -n1 || true)"
-
           if [[ -n "${PR_URL}" ]]; then
             echo "::notice::PR opened: ${PR_URL}"
             echo "migration_pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
@@ -961,3 +1001,4 @@ jobs:
           # Otherwise, fail the job and show context
           echo "ERROR: Migration failed (exit ${MIGRATE_RC})."
           head -n 100 "${LOG_FILE}" || true
+          exit "${MIGRATE_RC}"
