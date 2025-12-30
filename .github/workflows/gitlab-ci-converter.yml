@@ -583,7 +583,7 @@ jobs:
             page="${next}"
           done
 
-  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects (robust, disambiguated by GLMID)
+  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects (title preserved; GLMID in description)
   repo_migration_milestone_sync_all:
     name: "6) Repo Migration · 1.5 Milestone Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all]
@@ -636,16 +636,23 @@ jobs:
           set -Eeuo pipefail
           trap 'echo "Milestone step failed at line $LINENO"; exit 1' ERR
 
-          # Preload existing GH milestones (title -> number) to support upsert
+          # Preload existing GH milestones (for upsert & collision detection)
           GH_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                      "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100")
 
-          # Use a file-backed JSON map for stability
-          MAP_FILE=$(mktemp)
-          printf '{}' > "${MAP_FILE}"
-          printf '%s' "${GH_LIST}" | jq -c 'map({ ( .title ): .number }) | add // {}' > "${MAP_FILE}" || {
-            echo "ERROR: Failed to build GH milestone map from preload"; echo "${GH_LIST}" | head -c 400; exit 1;
-          }
+          # Build maps:
+          TITLE_FILE=$(mktemp); printf '{}' > "${TITLE_FILE}"
+          printf '%s' "${GH_LIST}" | jq -c 'map({ ( .title ): .number }) | add // {}' > "${TITLE_FILE}"
+
+          GLID_FILE=$(mktemp); printf '{}' > "${GLID_FILE}"
+          printf '%s' "${GH_LIST}" | jq -c '
+            map(
+              select(.description)
+              | . as $m
+              | (.description | capture("GLMID:(?<id>[0-9]+)")? // null) as $cap
+              | if $cap != null then { ($cap.id): $m.number } else {} end
+            ) | add // {}
+          ' > "${GLID_FILE}"
 
           page=1
           while true; do
@@ -680,29 +687,38 @@ jobs:
                 due_on="${raw_due}T23:59:59Z"  # end-of-day UTC
               fi
 
-              # Disambiguate title by GitLab milestone ID to avoid collisions
-              gh_title="${title} (GLMID:${gl_id})"
+              # Desired GH fields
+              desired_title="${title}"
+              token="GLMID:${gl_id}"
+              desired_desc="${token}\n\n${description}"
+
+              # Primary lookup by GLMID in description
+              number=$(jq -r --arg id "${gl_id}" '.[$id] // ""' "${GLID_FILE}")
 
               # Map state
               gl_state=$(jq -r '.state // "active"' <<< "${ms}")
               gh_state="open"
               [[ "${gl_state}" == "closed" ]] && gh_state="closed"
 
-              # Lookup existing number from MAP_FILE
-              number=$(jq -r --arg t "${gh_title}" '.[$t] // ""' "${MAP_FILE}")
-
               if [[ -n "${number}" && "${number}" != "null" ]]; then
                 # UPDATE existing milestone
-                payload=$(jq -n --arg title "${gh_title}" --arg desc "${description}" --arg state "${gh_state}" --arg due "${due_on}" '
+                payload=$(jq -n --arg title "${desired_title}" --arg desc "${desired_desc}" --arg state "${gh_state}" --arg due "${due_on}" '
                   { title:$title, description:$desc, state:$state } + ( if $due != "" then { due_on:$due } else {} end ) ')
                 st=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH \
                       -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                       -d "${payload}" \
                       "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones/${number}")
-                echo "Update '${gh_title}' (#${number}) → HTTP ${st}"
+                echo "Update '${desired_title}' (#${number}) → HTTP ${st}"
               else
-                # CREATE new milestone; retry without due_on if 422
-                payload=$(jq -n --arg title "${gh_title}" --arg desc "${description}" --arg state "${gh_state}" --arg due "${due_on}" '
+                # CREATE; check collision on title
+                title_in_use=$(jq -r --arg t "${desired_title}" '.[$t] // ""' "${TITLE_FILE}")
+                create_title="${desired_title}"
+                if [[ -n "${title_in_use}" && "${title_in_use}" != "null" ]]; then
+                  # Title already used by a different milestone ⇒ minimally disambiguate
+                  create_title="${desired_title} (GLMID:${gl_id})"
+                fi
+
+                payload=$(jq -n --arg title "${create_title}" --arg desc "${desired_desc}" --arg state "${gh_state}" --arg due "${due_on}" '
                   { title:$title, description:$desc, state:$state } + ( if $due != "" then { due_on:$due } else {} end ) ')
                 resp=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
                        -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
@@ -711,32 +727,33 @@ jobs:
                 http=$(echo "${resp}" | sed -n 's/^HTTP_STATUS://p')
 
                 if [[ "${http}" != "201" ]]; then
-                  payload2=$(jq -n --arg title "${gh_title}" --arg desc "${description}" --arg state "${gh_state}" \
+                  payload2=$(jq -n --arg title "${create_title}" --arg desc "${desired_desc}" --arg state "${gh_state}" \
                                '{ title:$title, description:$desc, state:$state }')
                   resp2=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
                           -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                           -d "${payload2}" \
                           "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
                   http2=$(echo "${resp2}" | sed -n 's/^HTTP_STATUS://p')
-                  echo "Create '${gh_title}' → HTTP ${http} (retry without due_on → ${http2})"
+                  echo "Create '${create_title}' → HTTP ${http} (retry without due_on → ${http2})"
 
                   if [[ "${http2}" == "201" ]]; then
                     newnum=$(echo "${resp2}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
-                    # Update MAP_FILE robustly; store number if possible, else string
-                    jq -c --arg t "${gh_title}" --arg n "${newnum}" \
-                       '. + { ($t): (try ($n|tonumber) catch $n) }' "${MAP_FILE}" > "${MAP_FILE}.tmp" \
-                       && mv "${MAP_FILE}.tmp" "${MAP_FILE}"
+                    jq -c --arg t "${create_title}" --arg n "${newnum}" \
+                       '. + { ($t): (try ($n|tonumber) catch $n) }' "${TITLE_FILE}" > "${TITLE_FILE}.tmp" && mv "${TITLE_FILE}.tmp" "${TITLE_FILE}"
+                    jq -c --arg id "${gl_id}" --arg n "${newnum}" \
+                       '. + { ($id): (try ($n|tonumber) catch $n) }' "${GLID_FILE}" > "${GLID_FILE}.tmp" && mv "${GLID_FILE}.tmp" "${GLID_FILE}"
                   fi
                 else
-                  echo "Create '${gh_title}' → HTTP ${http}"
+                  echo "Create '${create_title}' → HTTP ${http}"
                   newnum=$(echo "${resp}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
-                  jq -c --arg t "${gh_title}" --arg n "${newnum}" \
-                     '. + { ($t): (try ($n|tonumber) catch $n) }' "${MAP_FILE}" > "${MAP_FILE}.tmp" \
-                     && mv "${MAP_FILE}.tmp" "${MAP_FILE}"
+                  jq -c --arg t "${create_title}" --arg n "${newnum}" \
+                     '. + { ($t): (try ($n|tonumber) catch $n) }' "${TITLE_FILE}" > "${TITLE_FILE}.tmp" && mv "${TITLE_FILE}.tmp" "${TITLE_FILE}"
+                  jq -c --arg id "${gl_id}" --arg n "${newnum}" \
+                     '. + { ($id): (try ($n|tonumber) catch $n) }' "${GLID_FILE}" > "${GLID_FILE}.tmp" && mv "${GLID_FILE}.tmp" "${GLID_FILE}"
                 fi
               fi
 
-              sleep 1
+              sleep 0.4
             done
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
@@ -744,7 +761,7 @@ jobs:
             page="${next}"
           done
 
-  # 6a) Repo Migration · 1.6 Issue Sync — ALL projects (maps to disambiguated milestones)
+  # 6a) Repo Migration · 1.6 Issue Sync — ALL projects (prefers GLMID→number; title fallback)
   repo_migration_issue_sync_all:
     name: "6a) Repo Migration · 1.6 Issue Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all, repo_migration_milestone_sync_all]
@@ -790,21 +807,33 @@ jobs:
           GH_REPO="${PREF}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
 
-      - name: Preload GH milestones (title → number)
+      - name: Preload GH milestones (GLMID → number; title → number fallback)
         id: msmap
         env:
           GH_REPO: ${{ steps.prep.outputs.gh_repo }}
         run: |
           set -euo pipefail
-          MAP=$(curl -s -H "Authorization: Bearer ${GH_PAT}" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100" \
-                | jq -c 'map({( .title ): .number}) | add // {}')
-          echo "ms_map=${MAP}" >> "$GITHUB_OUTPUT"
+          GH_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" \
+                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100")
+
+          GLID_MAP=$(printf '%s' "${GH_LIST}" | jq -c '
+            map(
+              select(.description)
+              | . as $m
+              | (.description | capture("GLMID:(?<id>[0-9]+)")? // null) as $cap
+              | if $cap != null then { ($cap.id): $m.number } else {} end
+            ) | add // {}')
+
+          TITLE_MAP=$(printf '%s' "${GH_LIST}" | jq -c 'map({ ( .title ): .number }) | add // {}')
+
+          echo "glid_map=${GLID_MAP}"   >> "$GITHUB_OUTPUT"
+          echo "title_map=${TITLE_MAP}" >> "$GITHUB_OUTPUT"
 
       - name: Import issues (titles, body, labels, milestone, state, comments)
         env:
           GH_REPO: ${{ steps.prep.outputs.gh_repo }}
-          MS_MAP:  ${{ steps.msmap.outputs.ms_map }}
+          GLID_MAP: ${{ steps.msmap.outputs.glid_map }}
+          TITLE_MAP: ${{ steps.msmap.outputs.title_map }}
           GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
@@ -834,16 +863,14 @@ jobs:
               gl_url="${GL_URL%/}/${GL_PROJECT}/-/issues/${iid}"
               gh_body="**Imported from GitLab by @${author}**\n\n${body}\n\n---\n_Source_: ${gl_url}"
 
-              # Build the disambiguated GH milestone title to match Milestone Sync
-              GH_MS_TITLE="${ms_title}"
-              if [[ -n "${ms_id}" && "${ms_id}" != "null" ]]; then
-                GH_MS_TITLE="${ms_title} (GLMID:${ms_id})"
-              fi
-
-              # Lookup: disambiguated title, then plain title fallback
-              ms_num=$(jq -r --arg t "${GH_MS_TITLE}" --arg t2 "${ms_title}" --argjson map "${MS_MAP}" '
-                if $map[$t] then $map[$t]
-                else ( if $map[$t2] then $map[$t2] else empty end )
+              # Prefer GLMID→number mapping; fallback to title→number
+              ms_num=$(jq -r \
+                --arg id "${ms_id}" \
+                --arg t  "${ms_title}" \
+                --argjson glmap "${GLID_MAP}" \
+                --argjson tlmap "${TITLE_MAP}" '
+                if $glmap[$id] then $glmap[$id]
+                else ( if $tlmap[$t] then $tlmap[$t] else empty end )
                 end')
 
               payload=$(jq -n \
@@ -852,7 +879,7 @@ jobs:
                 --argjson labels "${labels}" \
                 --arg marker "imported:gitlab" \
                 --argjson msnum "${ms_num:-null}" '
-                {title:$title, body:$body, labels:([ $marker ] + ($labels // []))}
+                {title:$title, body:$body, labels:([ $marker ] + ($labels // [])) }
                 + ( if $msnum != null and ($msnum|type) == "number" then {milestone:$msnum} else {} end )')
 
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
@@ -882,7 +909,7 @@ jobs:
                       -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                       -d "$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')" \
                       "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${num}/comments" >/dev/null
-                    sleep 0.5
+                    sleep 0.4
                   done
 
                   nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${CHDR}" | tr -d '\r')
@@ -905,7 +932,7 @@ jobs:
                 fi
               fi
 
-              sleep 0.5
+              sleep 0.3
             done
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
@@ -921,8 +948,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT:   ${{ secrets.GH_PAT }}
