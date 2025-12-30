@@ -97,7 +97,7 @@ jobs:
       REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-      AUTO_CREATE:       ${{ vars.AUTO_CREATE_REPO }}       # empty/unset still creates
+      AUTO_CREATE:       ${{ vars.AUTO_CREATE_REPO }}
       INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }}
       WORKDIR: /tmp/mirror-work
     steps:
