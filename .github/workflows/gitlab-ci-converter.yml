@@ -98,7 +98,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       AUTO_CREATE:      ${{ vars.AUTO_CREATE_REPO }}   # may be empty—treated as auto-create enabled
       INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }}
       WORKDIR: /tmp/mirror-work
@@ -126,7 +126,6 @@ jobs:
           fi
           GH_REPO="${GH_REPO_PREFIX}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
-          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
       - name: Skip if destination repo is deletion-scheduled
         env:
@@ -177,7 +176,6 @@ jobs:
             echo "has_branches=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # ✅ Create destination repo when missing by default (AUTO_CREATE true or empty)
       - name: Ensure GitHub repo exists (create if missing; no deletions)
         if: env.AUTO_CREATE == 'true' || env.AUTO_CREATE == ''
         env:
@@ -296,7 +294,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       WORKDIR: /tmp/mirror-work
     steps:
       - name: Install git
@@ -370,7 +368,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -506,7 +504,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -589,7 +587,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -681,7 +679,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -840,7 +838,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       WORKDIR: /tmp/wiki-work
     steps:
       - name: Install git
@@ -936,8 +934,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
@@ -945,7 +943,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker are available
@@ -1071,7 +1069,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker
@@ -1239,7 +1237,7 @@ jobs:
           PR_URL=$(grep -Eo "https://github.com/.+/pull/[0-9]+" "${LOG_FILE}" | tr -d '\r' | tail -n1 || true)
           if [[ -n "${PR_URL}" ]]; then
             echo "::notice::PR opened: ${PR_URL}"
-            echo "migration_pr_url=${PR_URL}" >> "$GITHUB_OUTPUT"
+            printf 'migration_pr_url=%s\n' "${PR_URL}" >> "$GITHUB_OUTPUT"
             # ✅ Mark the job successful and stop right away
             exit 0
           fi
