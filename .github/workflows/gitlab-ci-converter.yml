@@ -41,7 +41,7 @@ jobs:
           : "${GL_GROUP:?GL_GROUP is required}"
 
           GL_API="${GL_URL%/}/api/v4"
-          GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x@uri')
+          GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')
 
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
@@ -98,8 +98,8 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-      AUTO_CREATE:      ${{ vars.AUTO_CREATE_REPO }}   # may be empty
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      AUTO_CREATE:      ${{ vars.AUTO_CREATE_REPO }}   # may be empty—treated as auto-create enabled
       INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }}
       WORKDIR: /tmp/mirror-work
     steps:
@@ -145,7 +145,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
@@ -177,7 +177,7 @@ jobs:
             echo "has_branches=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # ✅ Create destination repo when missing by default
+      # ✅ Create destination repo when missing by default (AUTO_CREATE true or empty)
       - name: Ensure GitHub repo exists (create if missing; no deletions)
         if: env.AUTO_CREATE == 'true' || env.AUTO_CREATE == ''
         env:
@@ -296,7 +296,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       WORKDIR: /tmp/mirror-work
     steps:
       - name: Install git
@@ -325,7 +325,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${{ matrix.project }}" '$x@uri')
+          GL_ENC=$(jq -rn --arg x "${{ matrix.project }}" '$x|@uri')
           RESP=$(mktemp)
           if ! curl --fail-with-body -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
             "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1" > "${RESP}"; then
@@ -370,7 +370,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -384,7 +384,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
           MODE="${REPO_NAME_MODE:-path}"
@@ -449,7 +449,7 @@ jobs:
 
               if [[ -n "${pr_num}" ]]; then
                 if [[ "${state}" == "closed" ]]; then
-                  curl -s -o /dev/null -w "%{http_%}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" \
+                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" \
                     -H "Accept: application/vnd.github+json" -d '{"state":"closed"}' \
                     "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}" >/dev/null
                 elif [[ "${state}" == "merged" ]]; then
@@ -506,7 +506,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -520,7 +520,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
           MODE="${REPO_NAME_MODE:-path}"
@@ -558,7 +558,7 @@ jobs:
                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels")
               ST=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
               if [[ "${ST}" != "201" ]]; then
-                NAME_ENC=$(jq -rn --arg x "${name}" '$x@uri')
+                NAME_ENC=$(jq -rn --arg x "${name}" '$x|@uri')
                 curl -s -o /dev/null -w "%{http_code}" -X PATCH \
                   -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                   -d "$(jq -n --arg new "${name}" --arg color "${color}" --arg desc "${description}" \
@@ -589,7 +589,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -603,7 +603,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
           MODE="${REPO_NAME_MODE:-path}"
@@ -647,7 +647,7 @@ jobs:
             page="${next}"
           done
 
-  # 6a) Repo Migration · 1.6 Issue Sync — ALL projects  (✅ fixed: matrix under strategy)
+  # 6a) Repo Migration · 1.6 Issue Sync — ALL projects
   repo_migration_issue_sync_all:
     name: "6a) Repo Migration · 1.6 Issue Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all, repo_migration_milestone_sync_all]
@@ -664,7 +664,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -678,7 +678,7 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')
+          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
           MODE="${REPO_NAME_MODE:-path}"
@@ -793,7 +793,7 @@ jobs:
             page="${next}"
           done
 
-  # 6b) Repo Migration · 1.7 Wiki Sync — ALL projects (updated to create/enable wiki)
+  # 6b) Repo Migration · 1.7 Wiki Sync — ALL projects (pre-create/enable wiki)
   repo_migration_wiki_sync_all:
     name: "6b) Repo Migration · 1.7 Wiki Sync (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -810,7 +810,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       WORKDIR: /tmp/wiki-work
     steps:
       - name: Install git
@@ -905,7 +905,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker are available
@@ -1031,7 +1031,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker
@@ -1048,7 +1048,7 @@ jobs:
             sudo apt-get install -y gh
           fi
           sudo apt-get install -y jq curl
-          if ! command -v docker >/dev/null 21:41; then
+          if ! command -v docker >/dev/null 2>&1; then
             sudo apt-get install -y docker.io
             sudo systemctl enable --now docker
           fi
