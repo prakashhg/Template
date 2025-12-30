@@ -3,9 +3,6 @@ name: Mirroring (GitLab → GitHub) + Trackers migration [Group-wide]
 
 on:
   workflow_dispatch: {}
-  # Optionally enable auto runs:
-  # push:
-  # delete:
 
 permissions:
   contents: write
@@ -82,7 +79,7 @@ jobs:
           json=$(printf '%s\n' "${filtered[@]:-}" | jq -R . | jq -s -c .)
           echo "project_list=${json}" >> "$GITHUB_OUTPUT"
 
-  # 2) Repo Migration · 1.1 Commit Sync (repositories & branches) — ALL projects
+  # 2) Repo Migration · 1.1 Commit Sync — ALL projects
   repo_migration_commit_sync_all:
     name: "2) Repo Migration · 1.1 Commit Sync (ALL projects)"
     needs: discover_projects
@@ -101,7 +98,7 @@ jobs:
       GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       AUTO_CREATE:       ${{ vars.AUTO_CREATE_REPO }}       # empty/unset still creates
-      INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }}
+      INIT_IF_EMPTY_DEST:${{ vars.INIT_IF_EMPTY_DEST }}
       WORKDIR: /tmp/mirror-work
     steps:
       - name: Install jq, curl, git, git-lfs
@@ -194,10 +191,9 @@ jobs:
             else
               CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
             fi
-            PAYLOAD=$(jq -n --arg name "${GH_REPO}" \
-              '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
+            PAYLOAD=$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
             RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-              -H "Authorization: Bearer ${GH_PAT}" -H "Content-Type: application/json" \
+              -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
               -d "${PAYLOAD}" "${CREATE_URL}")
             HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
             [[ "${HTTP}" == "201" ]] || { echo "ERROR: Create repo failed (HTTP ${HTTP})"; exit 1; }
@@ -439,7 +435,6 @@ jobs:
               pr_num=$(echo "${CREATE}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
               echo "PR create status=${http} number=${pr_num}"
 
-              # Apply labels
               if [[ -n "${pr_num}" && "${labels}" != "null" ]]; then
                 curl -s -o /dev/null -w "%{http_code}" \
                   -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
@@ -447,7 +442,6 @@ jobs:
                 sleep 1
               fi
 
-              # Close or merge state
               if [[ -n "${pr_num}" ]]; then
                 if [[ "${state}" == "closed" ]]; then
                   curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" \
@@ -933,7 +927,6 @@ jobs:
       GL_GROUP:   ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker are available
-        shell: bash
         run: |
           set -euo pipefail
           if ! command -v gh >/dev/null 2>&1; then
@@ -954,7 +947,6 @@ jobs:
           gh --version
 
       - name: Authenticate gh (for GHCR pulls)
-        shell: bash
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
@@ -963,7 +955,6 @@ jobs:
           gh auth status
 
       - name: Install Actions Importer extension and verify
-        shell: bash
         run: |
           set -euo pipefail
           gh extension install github/gh-actions-importer || true
@@ -972,7 +963,6 @@ jobs:
 
       - name: Compute destination repo name
         id: repo
-        shell: bash
         env:
           GL_PROJECT: ${{ matrix.project }}
         run: |
@@ -989,7 +979,6 @@ jobs:
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
 
       - name: Skip if destination repo is deletion-scheduled
-        shell: bash
         env:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
@@ -1000,7 +989,6 @@ jobs:
           fi
 
       - name: Configure importer via .env.local (non-interactive)
-        shell: bash
         run: |
           set -euo pipefail
           cat > .env.local <<EOF
@@ -1011,7 +999,6 @@ jobs:
           EOF
 
       - name: Dry-run conversion (writes YAML to output dir)
-        shell: bash
         env:
           GL_PROJECT: ${{ matrix.project }}
           GH_REPO:    ${{ steps.repo.outputs.gh_repo }}
@@ -1034,7 +1021,7 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
-  # 8) GitLab CI → GitHub Actions (migrate production: open PR) — ALL projects
+  # 8) GitLab CI → GitHub Actions (migrate: open PR) — ALL projects
   ci_migration_migrate:
     name: "8) ${{ matrix.project }} · GitLab CI → Actions (migrate, stop when PR raised)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -1058,7 +1045,6 @@ jobs:
       GL_GROUP:   ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker
-        shell: bash
         run: |
           set -euo pipefail
           if ! command -v gh >/dev/null 2>&1; then
@@ -1079,7 +1065,6 @@ jobs:
           gh --version
 
       - name: Authenticate gh
-        shell: bash
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
@@ -1088,7 +1073,6 @@ jobs:
           gh auth status
 
       - name: Install / update Actions Importer extension
-        shell: bash
         run: |
           set -euo pipefail
           gh extension install github/gh-actions-importer || true
@@ -1096,7 +1080,6 @@ jobs:
 
       - name: Compute destination repo name
         id: repo
-        shell: bash
         env:
           GL_PROJECT: ${{ matrix.project }}
         run: |
@@ -1113,7 +1096,6 @@ jobs:
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
 
       - name: Skip if destination repo is deletion-scheduled
-        shell: bash
         env:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
@@ -1124,7 +1106,6 @@ jobs:
           fi
 
       - name: Configure importer via .env.local
-        shell: bash
         run: |
           set -euo pipefail
           cat > .env.local <<EOF
@@ -1135,7 +1116,6 @@ jobs:
           EOF
 
       - name: Ensure destination repo exists (create if missing)
-        shell: bash
         env:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
@@ -1161,7 +1141,6 @@ jobs:
           fi
 
       - name: Ensure default branch points to an existing branch
-        shell: bash
         env:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
@@ -1193,7 +1172,6 @@ jobs:
           fi
 
       - name: Migrate pipeline → open PR and finish job green
-        shell: bash
         env:
           GL_PROJECT: ${{ matrix.project }}
           GH_REPO:    ${{ steps.repo.outputs.gh_repo }}
