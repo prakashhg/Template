@@ -296,7 +296,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       WORKDIR: /tmp/mirror-work
     steps:
       - name: Install git
