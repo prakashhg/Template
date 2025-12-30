@@ -126,6 +126,7 @@ jobs:
           fi
           GH_REPO="${GH_REPO_PREFIX}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
+          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
       - name: Skip if destination repo is deletion-scheduled
         env:
@@ -934,8 +935,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
