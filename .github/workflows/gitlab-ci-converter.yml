@@ -823,7 +823,7 @@ jobs:
           GH_REPO:   ${{ steps.prep.outputs.gh_repo }}
           GLID_MAP:  ${{ steps.msmap.outputs.glid_map }}
           TITLE_MAP: ${{ steps.msmap.outputs.title_map }}
-          GL_PROJECT:${{ matrix.project }}
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
           page=1
