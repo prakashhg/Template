@@ -361,8 +361,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 3
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT:   ${{ secrets.GH_PAT }}
@@ -793,7 +793,7 @@ jobs:
             page="${next}"
           done
 
-  # 6b) Repo Migration · 1.7 Wiki Sync — ALL projects (pre-create/enable wiki)
+  # 6b) Repo Migration · 1.7 Wiki Sync — ALL projects (pre-create/enable wiki + init guard)
   repo_migration_wiki_sync_all:
     name: "6b) Repo Migration · 1.7 Wiki Sync (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -863,7 +863,7 @@ jobs:
             [[ "${PATCH_HTTP}" == "200" ]] || echo "WARN: Could not enable wiki (HTTP ${PATCH_HTTP})"
           fi
 
-      - name: Mirror GitLab wiki → GitHub wiki
+      - name: Mirror GitLab wiki → GitHub wiki (skip if dest wiki not initialized)
         env:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
@@ -871,12 +871,22 @@ jobs:
           mkdir -p "${WORKDIR}"
           cd "${WORKDIR}"
           HOST="${GL_URL#*://}"
+
           SRC_WIKI_URL="https://oauth2:${GL_TOKEN}@${HOST}/${{ matrix.project }}.wiki.git"
           DEST_WIKI_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.wiki.git"
 
-          # Probe wiki repo; if it doesn't exist, skip gracefully
+          # Probe GitLab wiki; if it doesn't exist, skip gracefully
           if ! git ls-remote "${SRC_WIKI_URL}" &>/dev/null; then
             echo "No GitLab wiki found for ${{ matrix.project }} — skipping."
+            exit 0
+          fi
+
+          # Probe destination wiki; if not initialized, show actionable warning and skip
+          if ! git ls-remote "${DEST_WIKI_URL}" &>/dev/null; then
+            echo "::warning::GitHub wiki for ${GH_OWNER}/${GH_REPO} is not initialized yet."
+            echo "Open https://github.com/${GH_OWNER}/${GH_REPO}/wiki and click 'Create the first page' (Home)."
+            echo "GitHub creates the .wiki.git repository only after the first page exists."
+            echo "This is a one-time UI step; subsequent runs will mirror the wiki."
             exit 0
           fi
 
