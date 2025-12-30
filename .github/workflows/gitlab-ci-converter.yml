@@ -107,7 +107,8 @@ jobs:
 
       - name: Compute destination repo name
         id: repo
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env: 
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
           MODE="${REPO_NAME_MODE:-path}"; PREF="${GH_REPO_PREFIX:-}"; SEP="${GH_REPO_SEPARATOR:-"-"}"
