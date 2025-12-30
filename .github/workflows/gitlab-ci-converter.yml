@@ -663,7 +663,7 @@ jobs:
               due_on=""
               if [[ -n "${raw_due}" && "${raw_due}" != "null" ]]; then
                 # GitHub expects ISO-8601 timestamp in due_on
-                due_on="${raw_due}T23:59:59Z"  # end-of-day UTC [3](https://graphite.com/guides/link-pr-github-milestones)
+                due_on="${raw_due}T23:59:59Z"
               fi
 
               gl_state=$(jq -r '.state // "active"' <<< "${ms}")
@@ -978,8 +978,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
