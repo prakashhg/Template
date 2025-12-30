@@ -936,7 +936,7 @@ jobs:
             done
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${next}" || "${next}" == "0" ]] && break
+            [[ -z "${nnext}" || "${nnext}" == "0" ]] && break
             page="${next}"
           done
 
@@ -948,8 +948,8 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 6
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT:   ${{ secrets.GH_PAT }}
