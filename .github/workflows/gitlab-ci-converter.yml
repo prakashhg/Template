@@ -58,7 +58,7 @@ jobs:
               path=$(jq -r '.path_with_namespace' <<<"${proj}")
               [[ -z "${path}" ]] && continue
 
-              # Compute destination repo name for filtering by naming convention
+              # Compute destination repo name
               if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
                 base="$(echo "${path}" | tr '/' "${SEP}")"
               else
@@ -82,7 +82,7 @@ jobs:
           json=$(printf '%s\n' "${filtered[@]:-}" | jq -R . | jq -s -c .)
           echo "project_list=${json}" >> "$GITHUB_OUTPUT"
 
-  # 2) Repo Migration · 1.1 Commit Sync (repositories & branches) — ALL projects
+  # 2) Repo Migration · 1.1 Commit Sync — ALL projects
   repo_migration_commit_sync_all:
     name: "2) Repo Migration · 1.1 Commit Sync (ALL projects)"
     needs: discover_projects
@@ -149,7 +149,7 @@ jobs:
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
 
-      - name: Check GitLab source branches (non-fatal for 404/403)
+      - name: Check GitLab source branches (non-fatal)
         id: srcbranches
         run: |
           set -euo pipefail
@@ -356,7 +356,7 @@ jobs:
           echo "Pushing tags..."
           git push --tags github
 
-  # 4) Repo Migration · 1.3 PR Sync (MR → PR) — ALL projects (optional)
+  # 4) Repo Migration · 1.3 PR Sync (MR → PR) — optional
   repo_migration_pr_sync_all:
     name: "4) Repo Migration · 1.3 PR Sync (MR → PR) (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -583,7 +583,7 @@ jobs:
             page="${next}"
           done
 
-  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects (with group milestones + ISO due_on)
+  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects (disambiguated by GLMID)
   repo_migration_milestone_sync_all:
     name: "6) Repo Migration · 1.5 Milestone Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all]
@@ -635,7 +635,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Preload existing GH milestones (title -> number) to support upsert
+          # Preload existing GH milestones (title -> number)
           GH_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                      "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100")
           GH_MAP=$(jq -c 'map({ ( .title ): .number }) | add // {}' <<< "${GH_LIST}")
@@ -644,7 +644,7 @@ jobs:
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
 
-            # Include group milestones + both open/closed
+            # Include group milestones + open/closed (GitLab)
             if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" -G \
                  --data-urlencode "per_page=100" \
                  --data-urlencode "page=${page}" \
@@ -657,31 +657,37 @@ jobs:
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: milestones response not array"; head -c 300 "${RESP}" || true; break; }
 
             jq -c '.[]' "${RESP}" | while IFS= read -r ms; do
-              title=$(jq -r '.title' <<< "${ms}")
+              gl_id=$(jq -r '.id'            <<< "${ms}")
+              title=$(jq -r '.title'         <<< "${ms}")
               description=$(jq -r '.description // ""' <<< "${ms}")
               raw_due=$(jq -r '.due_date // ""' <<< "${ms}")
+
+              # GitHub expects ISO-8601 timestamp 'due_on' (not YYYY-MM-DD)
               due_on=""
               if [[ -n "${raw_due}" && "${raw_due}" != "null" ]]; then
-                # GitHub expects ISO-8601 timestamp in due_on
                 due_on="${raw_due}T23:59:59Z"
               fi
 
+              # Disambiguate title by GitLab milestone ID to avoid collisions
+              gh_title="${title} (GLMID:${gl_id})"
+
+              # Map state
               gl_state=$(jq -r '.state // "active"' <<< "${ms}")
               gh_state="open"
               [[ "${gl_state}" == "closed" ]] && gh_state="closed"
 
-              # Upsert by title
-              number=$(jq -r --arg t "${title}" --argjson m "${GH_MAP}" 'if $m[$t] then $m[$t] else "" end')
+              # Upsert by disambiguated title
+              number=$(jq -r --arg t "${gh_title}" --argjson m "${GH_MAP}" 'if $m[$t] then $m[$t] else "" end')
               if [[ -n "${number}" && "${number}" != "null" ]]; then
-                payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg state "${gh_state}" --arg due "${due_on}" '
+                payload=$(jq -n --arg title "${gh_title}" --arg desc "${description}" --arg state "${gh_state}" --arg due "${due_on}" '
                   { title:$title, description:$desc, state:$state } + ( if $due != "" then { due_on:$due } else {} end ) ')
                 st=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH \
                       -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                       -d "${payload}" \
                       "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones/${number}")
-                echo "Update '${title}' (#${number}) → HTTP ${st}"
+                echo "Update '${gh_title}' (#${number}) → HTTP ${st}"
               else
-                payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg state "${gh_state}" --arg due "${due_on}" '
+                payload=$(jq -n --arg title "${gh_title}" --arg desc "${description}" --arg state "${gh_state}" --arg due "${due_on}" '
                   { title:$title, description:$desc, state:$state } + ( if $due != "" then { due_on:$due } else {} end ) ')
                 resp=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
                        -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
@@ -689,23 +695,23 @@ jobs:
                        "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
                 http=$(echo "${resp}" | sed -n 's/^HTTP_STATUS://p')
                 if [[ "${http}" != "201" ]]; then
-                  # Retry without due_on (e.g., in case of format validation)
-                  payload2=$(jq -n --arg title "${title}" --arg desc "${description}" --arg state "${gh_state}" \
+                  # Retry without due_on if validation fails
+                  payload2=$(jq -n --arg title "${gh_title}" --arg desc "${description}" --arg state "${gh_state}" \
                                '{ title:$title, description:$desc, state:$state }')
                   resp2=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
                           -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                           -d "${payload2}" \
                           "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
                   http2=$(echo "${resp2}" | sed -n 's/^HTTP_STATUS://p')
-                  echo "Create '${title}' → HTTP ${http} (retry without due_on → ${http2})"
+                  echo "Create '${gh_title}' → HTTP ${http} (retry without due_on → ${http2})"
                   if [[ "${http2}" == "201" ]]; then
                     newnum=$(echo "${resp2}" | sed '/^HTTP_STATUS:/d' | jq -r '.number')
-                    GH_MAP=$(jq -c --arg t "${title}" --argjson n "${newnum}" '. + { ($t): $n }' <<< "${GH_MAP}")
+                    GH_MAP=$(jq -c --arg t "${gh_title}" --argjson n "${newnum}" '. + { ($t): $n }' <<< "${GH_MAP}")
                   fi
                 else
-                  echo "Create '${title}' → HTTP ${http}"
+                  echo "Create '${gh_title}' → HTTP ${http}"
                   newnum=$(echo "${resp}" | sed '/^HTTP_STATUS:/d' | jq -r '.number')
-                  GH_MAP=$(jq -c --arg t "${title}" --argjson n "${newnum}" '. + { ($t): $n }' <<< "${GH_MAP}")
+                  GH_MAP=$(jq -c --arg t "${gh_title}" --argjson n "${newnum}" '. + { ($t): $n }' <<< "${GH_MAP}")
                 fi
               fi
 
@@ -799,18 +805,33 @@ jobs:
               state=$(printf '%s' "${iss}" | jq -r '.state')
               labels=$(printf '%s' "${iss}" | jq -c '.labels // []')
               ms_title=$(printf '%s' "${iss}" | jq -r '.milestone.title // ""')
-              author=$(printf '%s' "${iss}" | jq -r '.author.username // "unknown"')
-              iid=$(printf '%s' "${iss}" | jq -r '.iid')
+              ms_id=$(printf  '%s' "${iss}" | jq -r '.milestone.id    // ""')
+              author=$(printf  '%s' "${iss}" | jq -r '.author.username // "unknown"')
+              iid=$(printf     '%s' "${iss}" | jq -r '.iid')
               confidential=$(printf '%s' "${iss}" | jq -r '.confidential')
 
-              ms_num=$(jq -r --arg t "${ms_title}" --argjson map "${MS_MAP}" \
-                         'if ($t != "" and ( $map[$t] )) then $map[$t] else empty end')
               gl_url="${GL_URL%/}/${GL_PROJECT}/-/issues/${iid}"
               gh_body="**Imported from GitLab by @${author}**\n\n${body}\n\n---\n_Source_: ${gl_url}"
-              payload=$(jq -n --arg title "${title}" --arg body "${gh_body}" \
-                           --argjson labels "${labels}" --arg marker "imported:gitlab" \
-                           --argjson msnum "${ms_num:-null}" '
-                {title:$title, body:$body, labels:([ $marker ] + ($labels // [])) }
+
+              # Build the disambiguated GH milestone title to match Milestone Sync
+              GH_MS_TITLE="${ms_title}"
+              if [[ -n "${ms_id}" && "${ms_id}" != "null" ]]; then
+                GH_MS_TITLE="${ms_title} (GLMID:${ms_id})"
+              fi
+
+              # Lookup: disambiguated title, then plain title fallback
+              ms_num=$(jq -r --arg t "${GH_MS_TITLE}" --arg t2 "${ms_title}" --argjson map "${MS_MAP}" '
+                if $map[$t] then $map[$t]
+                else ( if $map[$t2] then $map[$t2] else empty end )
+                end')
+
+              payload=$(jq -n \
+                --arg title "${title}" \
+                --arg body  "${gh_body}" \
+                --argjson labels "${labels}" \
+                --arg marker "imported:gitlab" \
+                --argjson msnum "${ms_num:-null}" '
+                {title:$title, body:$body, labels:([ $marker ] + ($labels // []))}
                 + ( if $msnum != null and ($msnum|type) == "number" then {milestone:$msnum} else {} end )')
 
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
@@ -871,7 +892,7 @@ jobs:
             page="${next}"
           done
 
-  # 6b) Repo Migration · 1.7 Wiki Sync — ALL projects (pre-create/enable wiki + init guard)
+  # 6b) Repo Migration · 1.7 Wiki Sync — ALL projects
   repo_migration_wiki_sync_all:
     name: "6b) Repo Migration · 1.7 Wiki Sync (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
