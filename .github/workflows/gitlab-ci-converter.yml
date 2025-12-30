@@ -572,7 +572,7 @@ jobs:
             page="${next}"
           done
 
-  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects
+  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects (no '>' and no raw '&' in URL)
   repo_migration_milestone_sync_all:
     name: "6) Repo Migration · 1.5 Milestone Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all]
@@ -625,23 +625,40 @@ jobs:
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-            if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/milestones?per_page=100&page=${page}" > "${RESP}"; then
+
+            # Build query with curl -G to avoid raw '&'
+            if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" -G \
+              --data-urlencode "per_page=100" --data-urlencode "page=${page}" \
+              "${GL_API}/projects/${GL_ENC}/milestones" > "${RESP}"; then
               echo "ERROR: GitLab Milestones API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
             fi
+
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: milestones response not array"; head -c 300 "${RESP}" || true; break; }
+
             jq -c '.[]' "${RESP}" | while IFS= read -r ms; do
               title=$(printf '%s' "${ms}" | jq -r '.title')
-              description=$(printf '%s' "${ms}" | jq -r '.description // empty')
-              due=$(printf '%s' "${ms}" | jq -r '.due_date // empty')
-              payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg due "${due}" \
-                '{title:$title, description:$desc} + ( ( ($due|length)>0 ) ? {due_on:$due} : {} )')
+              description=$(printf '%s' "${ms}" | jq -r '.description // ""')
+              due=$(printf '%s' "${ms}" | jq -r '.due_date // ""')
+
+              # Include due_on only when due is non-empty (no '>' operator)
+              payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg due "${due}" '
+                if ($due == "") then
+                  {title:$title, description:$desc}
+                else
+                  {title:$title, description:$desc, due_on:$due}
+                end')
+
               status=$(curl -s -o /dev/null -w "%{http_code}" \
-                -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
-                -d "${payload}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
+                -H "Authorization: Bearer ${GH_PAT}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                -d "${payload}" \
+                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
+
               echo "Milestone ${title} status: ${status}"
               sleep 1
             done
+
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next}" || "${next}" == "0" ]] && break
             page="${next}"
