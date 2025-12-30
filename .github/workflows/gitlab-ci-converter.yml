@@ -98,7 +98,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       AUTO_CREATE:      ${{ vars.AUTO_CREATE_REPO }}   # may be empty—treated as auto-create enabled
       INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }}
       WORKDIR: /tmp/mirror-work
@@ -294,7 +294,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       WORKDIR: /tmp/mirror-work
     steps:
       - name: Install git
@@ -368,7 +368,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -504,7 +504,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -587,7 +587,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -679,7 +679,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -838,7 +838,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       WORKDIR: /tmp/wiki-work
     steps:
       - name: Install git
@@ -943,7 +943,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker are available
@@ -1069,7 +1069,7 @@ jobs:
       GH_OWNER: ${{ vars.GH_OWNER }}
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker
