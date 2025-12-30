@@ -126,7 +126,6 @@ jobs:
           fi
           GH_REPO="${GH_REPO_PREFIX}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
-          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
       - name: Skip if destination repo is deletion-scheduled
         env:
@@ -177,7 +176,6 @@ jobs:
             echo "has_branches=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # ✅ Create destination repo when missing by default (AUTO_CREATE true or empty)
       - name: Ensure GitHub repo exists (create if missing; no deletions)
         if: env.AUTO_CREATE == 'true' || env.AUTO_CREATE == ''
         env:
@@ -557,7 +555,7 @@ jobs:
                         '{name:$name, color:$color, description:$desc}')" \
                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels")
               ST=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
-              if [[ "${ST}" != "201" ]]; then
+              if [[ "${ST}" != "201" ]] || true; then
                 NAME_ENC=$(jq -rn --arg x "${name}" '$x|@uri')
                 curl -s -o /dev/null -w "%{http_code}" -X PATCH \
                   -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
@@ -657,152 +655,6 @@ jobs:
 
               echo "Milestone ${title} status: ${status}"
               sleep 1
-            done
-
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${next}" || "${next}" == "0" ]] && break
-            page="${next}"
-          done
-
-  # 6a) Repo Migration · 1.6 Issue Sync — ALL projects
-  repo_migration_issue_sync_all:
-    name: "6a) Repo Migration · 1.6 Issue Sync (ALL projects)"
-    needs: [discover_projects, repo_migration_label_sync_all, repo_migration_milestone_sync_all]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-    env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:   ${{ secrets.GH_PAT }}
-      GL_URL:   ${{ vars.GL_URL }}
-      GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-    steps:
-      - name: Install jq & curl
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl
-
-      - name: Prepare GitLab API (+ compute GH_REPO)
-        id: prep
-        env:
-          GL_PROJECT: ${{ matrix.project }}
-        run: |
-          set -euo pipefail
-          GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
-          echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
-          echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-          MODE="${REPO_NAME_MODE:-path}"
-          PREF="${GH_REPO_PREFIX:-}"
-          SEP="${GH_REPO_SEPARATOR:-"-"}"
-          if [[ "${MODE}" == "fullpath" ]]; then
-            base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
-          else
-            base="${GL_PROJECT##*/}"
-          fi
-          GH_REPO="${PREF}${base}"
-          echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
-
-      - name: Preload GH milestones (title → number)
-        id: msmap
-        env:
-          GH_REPO: ${{ steps.prep.outputs.gh_repo }}
-        run: |
-          set -euo pipefail
-          MAP=$(curl -s -H "Authorization: Bearer ${GH_PAT}" \
-            "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100" \
-            | jq -c 'map({( .title ): .number}) | add // {}')
-          echo "ms_map=${MAP}" >> "$GITHUB_OUTPUT"
-
-      - name: Import issues (titles, body, labels, milestone, state, comments)
-        env:
-          GH_REPO: ${{ steps.prep.outputs.gh_repo }}
-          MS_MAP:  ${{ steps.msmap.outputs.ms_map }}
-        run: |
-          set -euo pipefail
-          page=1
-          while true; do
-            RESP=$(mktemp) ; HDR=$(mktemp)
-            curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/issues?scope=all&per_page=100&page=${page}" > "${RESP}" || {
-              echo "ERROR: GitLab Issues API non-2xx"; head -c 300 "${RESP}" || true; exit 1; }
-
-            [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: issues response not array"; break; }
-
-            jq -c '.[]' "${RESP}" | while IFS= read -r iss; do
-              title=$(printf '%s' "${iss}" | jq -r '.title')
-              body=$(printf '%s' "${iss}" | jq -r '.description // ""')
-              state=$(printf '%s' "${iss}" | jq -r '.state')
-              labels=$(printf '%s' "${iss}" | jq -c '.labels // []')
-              ms_title=$(printf '%s' "${iss}" | jq -r '.milestone.title // empty')
-              author=$(printf '%s' "${iss}" | jq -r '.author.username // "unknown"')
-              iid=$(printf '%s' "${iss}" | jq -r '.iid')
-              confidential=$(printf '%s' "${iss}" | jq -r '.confidential')
-
-              ms_num=$(jq -r --arg t "${ms_title}" --argjson map "${MS_MAP}" \
-                       'if ($t|length)>0 and ($map[$t]) then $map[$t] else empty end')
-              gl_url="${GL_URL%/}/${{ matrix.project }}/-/issues/${iid}"
-              gh_body="**Imported from GitLab by @${author}**\n\n${body}\n\n---\n_Source_: ${gl_url}"
-
-              payload=$(jq -n --arg title "${title}" --arg body "${gh_body}" \
-                            --argjson labels "${labels}" --arg marker "imported:gitlab" \
-                            --argjson msnum "${ms_num:-null}" '
-                 {title:$title, body:$body}
-                 + {labels: ( [ $marker ] + ($labels // []) )}
-                 + ( ( ($msnum? // null | type) == "number" ) ? {milestone:$msnum} : {} ) ')
-
-              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
-                -d "${payload}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues")
-              http=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
-              num=$(echo "${CREATE}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
-              echo "Issue create status=${http} number=${num}"
-
-              if [[ -n "${num}" ]]; then
-                # Comments (notes) – only user comments
-                cpage=1
-                while true; do
-                  CRESP=$(mktemp) ; CHDR=$(mktemp)
-                  curl --fail-with-body -s -D "${CHDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-                    "${GL_API}/projects/${GL_ENC}/issues/${iid}/notes?activity_filter=only_comments&per_page=100&page=${cpage}" > "${CRESP}" || break
-                  [[ "$(jq -r 'type' "${CRESP}")" == "array" ]] || break
-                  jq -c '.[]' "${CRESP}" | while IFS= read -r note; do
-                    nbody=$(printf '%s' "${note}" | jq -r '.body')
-                    nauth=$(printf '%s' "${note}" | jq -r '.author.username // "unknown"')
-                    curl -s -o /dev/null -w "%{http_code}" \
-                      -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-                      -d "$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')" \
-                      "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${num}/comments" >/dev/null
-                    sleep 0.5
-                  done
-                  nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${CHDR}" | tr -d '\r')
-                  [[ -z "${nnext}" || "${nnext}" == "0" ]] && break
-                  cpage="${nnext}"
-                done
-
-                # Close the issue if needed
-                if [[ "${state}" == "closed" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" \
-                    -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-                    -d '{"state":"closed"}' \
-                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${num}" >/dev/null
-                fi
-
-                # Flag confidential issues
-                if [[ "${confidential}" == "true" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" \
-                    -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-                    -d '["confidential"]' \
-                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${num}/labels" >/dev/null
-                fi
-              fi
-              sleep 0.5
             done
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
@@ -990,7 +842,6 @@ jobs:
           fi
           GH_REPO="${PREF}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
-          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
       - name: Skip if destination repo is deletion-scheduled
         shell: bash
@@ -1115,7 +966,6 @@ jobs:
           fi
           GH_REPO="${PREF}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
-          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
       - name: Skip if destination repo is deletion-scheduled
         shell: bash
@@ -1217,7 +1067,7 @@ jobs:
           gh actions-importer migrate gitlab \
             --target-url "https://github.com/${GH_OWNER}/${GH_REPO}" \
             --output-dir "tmp/migrate/${GH_REPO}" \
-            --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
+            --namespace "${GL_GROUP:-${GL_PROJECT%/*]}" \
             --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
           MIGRATE_RC=${PIPESTATUS[0]}
           set -e
