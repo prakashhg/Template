@@ -95,7 +95,7 @@ jobs:
       GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
       AUTO_CREATE:       ${{ vars.AUTO_CREATE_REPO }}
-      INIT_IF_EMPTY_DEST:${{ vars.INIT_IF_EMPTY_DEST }}
+      INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }}
       WORKDIR: /tmp/mirror-work
     steps:
       - name: Install jq, curl, git, git-lfs
