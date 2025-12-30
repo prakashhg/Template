@@ -117,14 +117,16 @@ jobs:
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
 
       - name: Skip if destination repo is deletion-scheduled
-        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env: 
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           [[ "${GH_REPO}" == deletion_scheduled-* || "${GH_REPO}" == *deletion_scheduled-* ]] && { echo "Skipping ${GH_REPO}"; exit 0; }
 
       - name: Prepare GitLab API (safe encoding)
         id: glapi
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env:
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
@@ -146,7 +148,8 @@ jobs:
 
       - name: Ensure GitHub repo exists (create if missing; no deletions)
         if: env.AUTO_CREATE == 'true'
-        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
@@ -161,7 +164,8 @@ jobs:
 
       - name: Clone GitLab --mirror and push to GitHub
         if: steps.srcbranches.outputs.has_branches == 'true'
-        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env: 
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           mkdir -p "${WORKDIR}"; cd "${WORKDIR}"
@@ -177,7 +181,8 @@ jobs:
 
       - name: Verify branches exist in destination after mirror
         if: steps.srcbranches.outputs.has_branches == 'true'
-        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env: 
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           BR="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/branches?per_page=1")"
@@ -185,7 +190,8 @@ jobs:
 
       - name: Optionally initialize destination if source is empty
         if: steps.srcbranches.outputs.has_branches != 'true' && env.INIT_IF_EMPTY_DEST == 'true'
-        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           DEFAULT_BRANCH="main"
@@ -204,7 +210,8 @@ jobs:
     name: "3) Repo Migration · 1.2 Tag Sync (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
     runs-on: ubuntu-latest
-    strategy: { fail-fast: false, max-parallel: 6, matrix: { project: ${{ fromJson(needs.discover_projects.outputs.project_list) }} } }
+    strategy: { fail-fast: false, max-parallel: 6, 
+    matrix: { project: ${{ fromJson(needs.discover_projects.outputs.project_list) }} } }
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT:   ${{ secrets.GH_PAT }}
@@ -219,7 +226,8 @@ jobs:
         run: sudo apt-get update -y && sudo apt-get install -y git
       - name: Compute destination repo name
         id: repo
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env:
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           MODE="${REPO_NAME_MODE:-path}"; PREF="${GH_REPO_PREFIX:-}"; SEP="${GH_REPO_SEPARATOR:-"-"}"
           if [[ "${MODE}" == "fullpath" ]]; then base="$(echo "${GL_PROJECT}"|tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
@@ -231,7 +239,8 @@ jobs:
           RESP=$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1")
           [[ "$(jq -r 'type' <<< "${RESP}")" == "array" && "$(jq 'length' <<< "${RESP}")" -ge 1 ]] || { echo "Skip"; exit 0; }
       - name: Fetch tags from GitLab and push to GitHub
-        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env: 
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           mkdir -p "${WORKDIR}"; cd "${WORKDIR}"
@@ -274,13 +283,15 @@ jobs:
             sudo apt-get update -y && sudo apt-get install -y gh
           fi
       - name: gh auth
-        env: { GH_PAT: ${{ secrets.GH_PAT }} }
+        env: 
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           echo "${GH_PAT}" | gh auth login --with-token --hostname "${GH_HOST}"
           gh auth status
       - name: Compute GH_REPO
         id: repo
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env: 
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           MODE="${REPO_NAME_MODE:-path}"; PREF="${GH_REPO_PREFIX:-}"; SEP="${GH_REPO_SEPARATOR:-"-"}"
           if [[ "${MODE}" == "fullpath" ]]; then base="$(echo "${GL_PROJECT}"|tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
@@ -351,18 +362,21 @@ jobs:
             sudo apt-get update -y && sudo apt-get install -y gh
           fi
       - name: gh auth
-        env: { GH_PAT: ${{ secrets.GH_PAT }} }
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           echo "${GH_PAT}" | gh auth login --with-token --hostname "${GH_HOST}"
       - name: Compute GH_REPO
         id: repo
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env:
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           MODE="${REPO_NAME_MODE:-path}"; PREF="${GH_REPO_PREFIX:-}"; SEP="${GH_REPO_SEPARATOR:-"-"}"
           if [[ "${MODE}" == "fullpath" ]]; then base="$(echo "${GL_PROJECT}"|tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
           echo "gh_repo=${PREF}${base}" >> "$GITHUB_OUTPUT"
       - name: Migrate labels (GitLab → GitHub via gh)
-        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env: 
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"; GL_ENC=$(jq -rn --arg x "${{ matrix.project }}" '$x|@uri')
@@ -408,7 +422,8 @@ jobs:
             sudo apt-get update -y && sudo apt-get install -y gh
           fi
       - name: gh auth
-        env: { GH_PAT: ${{ secrets.GH_PAT }} }
+        env:  
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: echo "${GH_PAT}" | gh auth login --with-token --hostname "${GH_HOST}"
       - name: Compute GH_REPO
         id: repo
@@ -418,7 +433,8 @@ jobs:
           if [[ "${MODE}" == "fullpath" ]]; then base="$(echo "${GL_PROJECT}"|tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
           echo "gh_repo=${PREF}${base}" >> "$GITHUB_OUTPUT"
       - name: Migrate milestones via gh api
-        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env: 
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"; GL_ENC=$(jq -rn --arg x "${{ matrix.project }}" '$x|@uri')
@@ -470,11 +486,13 @@ jobs:
             sudo apt-get update -y && sudo apt-get install -y gh
           fi
       - name: gh auth
-        env: { GH_PAT: ${{ secrets.GH_PAT }} }
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: echo "${GH_PAT}" | gh auth login --with-token --hostname "${GH_HOST}"
       - name: Compute GH_REPO & preload milestones (title→number)
         id: prep
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env:
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
           MODE="${REPO_NAME_MODE:-path}"; PREF="${GH_REPO_PREFIX:-}"; SEP="${GH_REPO_SEPARATOR:-"-"}"
@@ -567,13 +585,15 @@ jobs:
         run: sudo apt-get update -y && sudo apt-get install -y git
       - name: Compute GH_REPO
         id: repo
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env:
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           MODE="${REPO_NAME_MODE:-path}"; PREF="${GH_REPO_PREFIX:-}"; SEP="${GH_REPO_SEPARATOR:-"-"}"
           if [[ "${MODE}" == "fullpath" ]]; then base="$(echo "${GL_PROJECT}"|tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
           echo "gh_repo=${PREF}${base}" >> "$GITHUB_OUTPUT"
       - name: Mirror GitLab wiki → GitHub wiki
-        env: { GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           mkdir -p "${WORKDIR}"; cd "${WORKDIR}"
@@ -616,7 +636,8 @@ jobs:
           sudo systemctl enable --now docker || true
           gh --version
       - name: gh auth
-        env: { GH_PAT: ${{ secrets.GH_PAT }} }
+        env: 
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
           gh auth status
@@ -626,7 +647,8 @@ jobs:
           gh actions-importer update
       - name: Compute GH_REPO
         id: repo
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env: 
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           MODE="${REPO_NAME_MODE:-path}"; PREF="${GH_REPO_PREFIX:-}"; SEP="${GH_REPO_SEPARATOR:-"-"}"
           if [[ "${MODE}" == "fullpath" ]]; then base="$(echo "${GL_PROJECT}"|tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
@@ -640,7 +662,9 @@ jobs:
           GITLAB_INSTANCE_URL=${GL_URL}
           EOF
       - name: Dry-run conversion
-        env: { GL_PROJECT: ${{ matrix.project }}, GH_REPO: ${{ steps.repo.outputs.gh_repo }} }
+        env: 
+          GL_PROJECT: ${{ matrix.project }}
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           mkdir -p "tmp/dry-run/${GH_REPO}"
           gh actions-importer dry-run gitlab \
@@ -682,7 +706,8 @@ jobs:
           fi
           sudo systemctl enable --now docker || true
       - name: gh auth
-        env: { GH_PAT: ${{ secrets.GH_PAT }} }
+        env: 
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
       - name: Install/update Actions Importer
         run: |
@@ -690,7 +715,8 @@ jobs:
           gh actions-importer update
       - name: Compute GH_REPO
         id: repo
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env:
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           MODE="${REPO_NAME_MODE:-path}"; PREF="${GH_REPO_PREFIX:-}"; SEP="${GH_REPO_SEPARATOR:-"-"}"
           if [[ "${MODE}" == "fullpath" ]]; then base="$(echo "${GL_PROJECT}"|tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
@@ -704,7 +730,10 @@ jobs:
           GITLAB_INSTANCE_URL=${GL_URL}
           EOF
       - name: Migrate pipeline (open PR, finish green)
-        env: { GL_PROJECT: ${{ matrix.project }}, GH_REPO: ${{ steps.repo.outputs.gh_repo }}, GH_OWNER: ${{ env.GH_OWNER }} }
+        env: 
+          GL_PROJECT: ${{ matrix.project }}
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+          GH_OWNER: ${{ env.GH_OWNER }} }
         run: |
           set -euo pipefail
           mkdir -p "tmp/migrate/${GH_REPO}"
