@@ -583,7 +583,7 @@ jobs:
             page="${next}"
           done
 
-  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects (disambiguated by GLMID)
+  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects (robust, disambiguated by GLMID)
   repo_migration_milestone_sync_all:
     name: "6) Repo Migration · 1.5 Milestone Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all]
@@ -633,39 +633,51 @@ jobs:
         env:
           GH_REPO: ${{ steps.prep.outputs.gh_repo }}
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
+          trap 'echo "Milestone step failed at line $LINENO"; exit 1' ERR
 
-          # Preload existing GH milestones (title -> number)
+          # Preload existing GH milestones (title -> number) to support upsert
           GH_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                      "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100")
-          GH_MAP=$(jq -c 'map({ ( .title ): .number }) | add // {}' <<< "${GH_LIST}")
+
+          # Use a file-backed JSON map for stability
+          MAP_FILE=$(mktemp)
+          printf '{}' > "${MAP_FILE}"
+          printf '%s' "${GH_LIST}" | jq -c 'map({ ( .title ): .number }) | add // {}' > "${MAP_FILE}" || {
+            echo "ERROR: Failed to build GH milestone map from preload"; echo "${GH_LIST}" | head -c 400; exit 1;
+          }
 
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
 
-            # Include group milestones + open/closed (GitLab)
+            # Include group milestones + open/closed (GitLab API)
             if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" -G \
                  --data-urlencode "per_page=100" \
                  --data-urlencode "page=${page}" \
                  --data-urlencode "include_ancestors=true" \
                  --data-urlencode "state=all" \
                  "${GL_API}/projects/${GL_ENC}/milestones" > "${RESP}"; then
-              echo "ERROR: GitLab Milestones API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
+              echo "ERROR: GitLab Milestones API non-2xx"
+              cat "${HDR}" || true
+              head -c 300 "${RESP}" || true
+              exit 1
             fi
 
-            [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: milestones response not array"; head -c 300 "${RESP}" || true; break; }
+            [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || {
+              echo "WARN: milestones response not array"; head -c 300 "${RESP}" || true; break;
+            }
 
             jq -c '.[]' "${RESP}" | while IFS= read -r ms; do
-              gl_id=$(jq -r '.id'            <<< "${ms}")
-              title=$(jq -r '.title'         <<< "${ms}")
+              gl_id=$(jq -r '.id'                    <<< "${ms}")
+              title=$(jq -r '.title'                 <<< "${ms}")
               description=$(jq -r '.description // ""' <<< "${ms}")
-              raw_due=$(jq -r '.due_date // ""' <<< "${ms}")
+              raw_due=$(jq -r '.due_date // ""'     <<< "${ms}")
 
-              # GitHub expects ISO-8601 timestamp 'due_on' (not YYYY-MM-DD)
+              # GitHub expects ISO-8601 timestamp in due_on (not YYYY-MM-DD)
               due_on=""
               if [[ -n "${raw_due}" && "${raw_due}" != "null" ]]; then
-                due_on="${raw_due}T23:59:59Z"
+                due_on="${raw_due}T23:59:59Z"  # end-of-day UTC
               fi
 
               # Disambiguate title by GitLab milestone ID to avoid collisions
@@ -676,9 +688,11 @@ jobs:
               gh_state="open"
               [[ "${gl_state}" == "closed" ]] && gh_state="closed"
 
-              # Upsert by disambiguated title
-              number=$(jq -r --arg t "${gh_title}" --argjson m "${GH_MAP}" 'if $m[$t] then $m[$t] else "" end')
+              # Lookup existing number from MAP_FILE
+              number=$(jq -r --arg t "${gh_title}" '.[$t] // ""' "${MAP_FILE}")
+
               if [[ -n "${number}" && "${number}" != "null" ]]; then
+                # UPDATE existing milestone
                 payload=$(jq -n --arg title "${gh_title}" --arg desc "${description}" --arg state "${gh_state}" --arg due "${due_on}" '
                   { title:$title, description:$desc, state:$state } + ( if $due != "" then { due_on:$due } else {} end ) ')
                 st=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH \
@@ -687,6 +701,7 @@ jobs:
                       "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones/${number}")
                 echo "Update '${gh_title}' (#${number}) → HTTP ${st}"
               else
+                # CREATE new milestone; retry without due_on if 422
                 payload=$(jq -n --arg title "${gh_title}" --arg desc "${description}" --arg state "${gh_state}" --arg due "${due_on}" '
                   { title:$title, description:$desc, state:$state } + ( if $due != "" then { due_on:$due } else {} end ) ')
                 resp=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
@@ -694,8 +709,8 @@ jobs:
                        -d "${payload}" \
                        "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
                 http=$(echo "${resp}" | sed -n 's/^HTTP_STATUS://p')
+
                 if [[ "${http}" != "201" ]]; then
-                  # Retry without due_on if validation fails
                   payload2=$(jq -n --arg title "${gh_title}" --arg desc "${description}" --arg state "${gh_state}" \
                                '{ title:$title, description:$desc, state:$state }')
                   resp2=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
@@ -704,14 +719,20 @@ jobs:
                           "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
                   http2=$(echo "${resp2}" | sed -n 's/^HTTP_STATUS://p')
                   echo "Create '${gh_title}' → HTTP ${http} (retry without due_on → ${http2})"
+
                   if [[ "${http2}" == "201" ]]; then
-                    newnum=$(echo "${resp2}" | sed '/^HTTP_STATUS:/d' | jq -r '.number')
-                    GH_MAP=$(jq -c --arg t "${gh_title}" --argjson n "${newnum}" '. + { ($t): $n }' <<< "${GH_MAP}")
+                    newnum=$(echo "${resp2}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
+                    # Update MAP_FILE robustly; store number if possible, else string
+                    jq -c --arg t "${gh_title}" --arg n "${newnum}" \
+                       '. + { ($t): (try ($n|tonumber) catch $n) }' "${MAP_FILE}" > "${MAP_FILE}.tmp" \
+                       && mv "${MAP_FILE}.tmp" "${MAP_FILE}"
                   fi
                 else
                   echo "Create '${gh_title}' → HTTP ${http}"
-                  newnum=$(echo "${resp}" | sed '/^HTTP_STATUS:/d' | jq -r '.number')
-                  GH_MAP=$(jq -c --arg t "${gh_title}" --argjson n "${newnum}" '. + { ($t): $n }' <<< "${GH_MAP}")
+                  newnum=$(echo "${resp}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
+                  jq -c --arg t "${gh_title}" --arg n "${newnum}" \
+                     '. + { ($t): (try ($n|tonumber) catch $n) }' "${MAP_FILE}" > "${MAP_FILE}.tmp" \
+                     && mv "${MAP_FILE}.tmp" "${MAP_FILE}"
                 fi
               fi
 
@@ -723,7 +744,7 @@ jobs:
             page="${next}"
           done
 
-  # 6a) Repo Migration · 1.6 Issue Sync — ALL projects
+  # 6a) Repo Migration · 1.6 Issue Sync — ALL projects (maps to disambiguated milestones)
   repo_migration_issue_sync_all:
     name: "6a) Repo Migration · 1.6 Issue Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all, repo_migration_milestone_sync_all]
