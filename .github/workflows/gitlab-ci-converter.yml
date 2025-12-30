@@ -22,9 +22,9 @@ jobs:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL:   ${{ vars.GL_URL }}
       GL_GROUP: ${{ vars.GL_GROUP }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -39,7 +39,6 @@ jobs:
           set -euo pipefail
           : "${GL_URL:?GL_URL is required}"
           : "${GL_GROUP:?GL_GROUP is required}"
-
           GL_API="${GL_URL%/}/api/v4"
           GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')
 
@@ -66,7 +65,7 @@ jobs:
               fi
               dest="${GH_REPO_PREFIX}${base}"
 
-              # Exclude deletion-scheduled repos
+              # Exclude deletion-scheduled repos by name pattern
               if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
                 echo "Exclude (deletion-scheduled): ${dest} (from GL: ${path})"
               else
@@ -75,7 +74,7 @@ jobs:
             done < <(jq -c '.[]' "${RESP}")
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${next}" || "${next}" == "0" ]] && break
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
@@ -97,11 +96,11 @@ jobs:
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
-      AUTO_CREATE:        ${{ vars.AUTO_CREATE_REPO }} # empty/unset still creates
-      INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      AUTO_CREATE:           ${{ vars.AUTO_CREATE_REPO }} # empty/unset still creates
+      INIT_IF_EMPTY_DEST:    ${{ vars.INIT_IF_EMPTY_DEST }}
       WORKDIR: /tmp/mirror-work
     steps:
       - name: Install jq, curl, git, git-lfs
@@ -279,7 +278,7 @@ jobs:
           [[ "${PATCH_HTTP}" == "200" ]] || echo "WARN: Could not set default_branch (HTTP ${PATCH_HTTP})."
           echo "Destination initialized with README on '${DEFAULT_BRANCH}'."
 
-  # 3) Repo Migration · 1.2 Tag Sync — ALL projects
+  # 3) Repo Migration · 1.2 Tag Sync (ALL projects)
   repo_migration_tag_sync_all:
     name: "3) Repo Migration · 1.2 Tag Sync (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
@@ -294,9 +293,9 @@ jobs:
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       WORKDIR: /tmp/mirror-work
     steps:
       - name: Install git
@@ -329,11 +328,13 @@ jobs:
           RESP=$(mktemp)
           if ! curl --fail-with-body -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
                "${GL_API}/projects/${GL_ENC}/repository/branches?per_page=1" > "${RESP}"; then
-            echo "No branches / cannot access – skipping tags"; exit 0
+            echo "No branches / cannot access – skipping tags"
+            exit 0
           fi
           TYPE=$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")
           if [[ "${TYPE}" != "array" ]]; then
-            echo "No branches – skipping tags"; exit 0
+            echo "No branches – skipping tags"
+            exit 0
           fi
           LEN=$(jq 'length' "${RESP}")
           [[ "${LEN}" -ge 1 ]] || { echo "No branches – skipping tags"; exit 0; }
@@ -372,9 +373,9 @@ jobs:
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -391,7 +392,6 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-
           MODE="${REPO_NAME_MODE:-path}"
           PREF="${GH_REPO_PREFIX:-}"
           SEP="${GH_REPO_SEPARATOR:-"-"}"
@@ -419,7 +419,7 @@ jobs:
 
             jq -c '.[]' "${RESP}" | while IFS= read -r mr; do
               title=$(printf '%s' "${mr}" | jq -r '.title')
-              body=$(printf '%s' "${mr}" | jq -r '.description // ""')
+              body=$(printf  '%s' "${mr}" | jq -r '.description // ""')
               state=$(printf '%s' "${mr}" | jq -r '.state')
               labels=$(printf '%s' "${mr}" | jq -c '.labels')
               source_branch=$(printf '%s' "${mr}" | jq -r '.source_branch')
@@ -428,38 +428,38 @@ jobs:
               gl_iid=$(printf '%s' "${mr}" | jq -r '.iid')
 
               HEAD_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                        "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}")
+                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}")
               BASE_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                        "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}")
+                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}")
               if [[ "${HEAD_OK}" != "200" || "${BASE_OK}" != "200" ]]; then
-                echo "Skip MR#${gl_iid}: missing head/base (${source_branch}→${target_branch})"; continue
+                echo "Skip MR#${gl_iid}: missing head/base (${source_branch}→${target_branch})"
+                continue
               fi
 
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
                 -H "Accept: application/vnd.github+json" \
                 -d "$(jq -n --arg title "${title}" --arg body "**Imported from GitLab by @${author}**\n\n${body}" \
-                          --arg head "${source_branch}" --arg base "${target_branch}" \
-                          '{title:$title, body:$body, head:$head, base:$base}')" \
+                           --arg head "${source_branch}" --arg base "${target_branch}" \
+                           '{title:$title, body:$body, head:$head, base:$base}')" \
                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls")
               http=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
               pr_num=$(echo "${CREATE}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
               echo "PR create status=${http} number=${pr_num}"
 
               if [[ -n "${pr_num}" && "${labels}" != "null" ]]; then
-                curl -s -o /dev/null -w "%{http_code}" \
-                  -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                   -d "${labels}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/labels" >/dev/null
                 sleep 1
               fi
 
               if [[ -n "${pr_num}" ]]; then
                 if [[ "${state}" == "closed" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" \
-                    -H "Accept: application/vnd.github+json" -d '{"state":"closed"}' \
+                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                    -d '{"state":"closed"}' \
                     "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}" >/dev/null
                 elif [[ "${state}" == "merged" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer ${GH_PAT}" \
-                    -H "Accept: application/vnd.github+json" -d '{"merge_method":"merge"}' \
+                  curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+                    -d '{"merge_method":"merge"}' \
                     "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls/${pr_num}/merge" >/dev/null
                 fi
                 sleep 1
@@ -478,21 +478,19 @@ jobs:
                 jq -c '.[]' "${CRESP}" | while IFS= read -r note; do
                   nbody=$(printf '%s' "${note}" | jq -r '.body')
                   nauth=$(printf '%s' "${note}" | jq -r '.author.username')
-                  curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                    -H "Accept: application/vnd.github+json" \
+                  curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                     -d "$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')" \
                     "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/comments" >/dev/null
                   sleep 1
                 done
-
                 nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${CHDR}" | tr -d '\r')
-                [[ -z "${nnext}" || "${nnext}" == "0" ]] && break
+                [[ -z "${nnext:-}" || "${nnext}" == "0" ]] && break
                 cpage="${nnext}"
               done
             done
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${next}" || "${next}" == "0" ]] && break
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
@@ -511,9 +509,9 @@ jobs:
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -530,7 +528,6 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-
           MODE="${REPO_NAME_MODE:-path}"
           PREF="${GH_REPO_PREFIX:-}"
           SEP="${GH_REPO_SEPARATOR:-"-"}"
@@ -564,7 +561,7 @@ jobs:
               CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
                 -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
                 -d "$(jq -n --arg name "${name}" --arg color "${color}" --arg desc "${description}" \
-                     '{name:$name, color:$color, description:$desc}')" \
+                      '{name:$name, color:$color, description:$desc}')" \
                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/labels")
               ST=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
               if [[ "${ST}" != "201" ]]; then
@@ -579,7 +576,7 @@ jobs:
             done
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${next}" || "${next}" == "0" ]] && break
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
@@ -598,9 +595,9 @@ jobs:
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -617,7 +614,6 @@ jobs:
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
           echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
           echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-
           MODE="${REPO_NAME_MODE:-path}"
           PREF="${GH_REPO_PREFIX:-}"
           SEP="${GH_REPO_SEPARATOR:-"-"}"
@@ -638,7 +634,7 @@ jobs:
 
           # Preload existing GH milestones (for upsert & collision detection)
           GH_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-                     "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100")
+            "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100")
 
           # Build maps:
           TITLE_FILE=$(mktemp); printf '{}' > "${TITLE_FILE}"
@@ -647,17 +643,14 @@ jobs:
           GLID_FILE=$(mktemp); printf '{}' > "${GLID_FILE}"
           printf '%s' "${GH_LIST}" | jq -c '
             map(
-              select(.description)
-              | . as $m
+              select(.description) as $m
               | (.description | capture("GLMID:(?<id>[0-9]+)")? // null) as $cap
               | if $cap != null then { ($cap.id): $m.number } else {} end
-            ) | add // {}
-          ' > "${GLID_FILE}"
+            ) | add // {}' > "${GLID_FILE}"
 
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-
             # Include group milestones + open/closed (GitLab API)
             if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" -G \
                  --data-urlencode "per_page=100" \
@@ -670,21 +663,20 @@ jobs:
               head -c 300 "${RESP}" || true
               exit 1
             fi
-
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || {
               echo "WARN: milestones response not array"; head -c 300 "${RESP}" || true; break;
             }
 
             jq -c '.[]' "${RESP}" | while IFS= read -r ms; do
-              gl_id=$(jq -r '.id'                    <<< "${ms}")
-              title=$(jq -r '.title'                 <<< "${ms}")
+              gl_id=$(jq -r '.id' <<< "${ms}")
+              title=$(jq -r '.title' <<< "${ms}")
               description=$(jq -r '.description // ""' <<< "${ms}")
-              raw_due=$(jq -r '.due_date // ""'     <<< "${ms}")
+              raw_due=$(jq -r '.due_date // ""' <<< "${ms}")
 
               # GitHub expects ISO-8601 timestamp in due_on (not YYYY-MM-DD)
               due_on=""
               if [[ -n "${raw_due}" && "${raw_due}" != "null" ]]; then
-                due_on="${raw_due}T23:59:59Z"  # end-of-day UTC
+                due_on="${raw_due}T23:59:59Z" # end-of-day UTC
               fi
 
               # Desired GH fields
@@ -705,9 +697,9 @@ jobs:
                 payload=$(jq -n --arg title "${desired_title}" --arg desc "${desired_desc}" --arg state "${gh_state}" --arg due "${due_on}" '
                   { title:$title, description:$desc, state:$state } + ( if $due != "" then { due_on:$due } else {} end ) ')
                 st=$(curl -s -o /dev/null -w "%{http_code}" -X PATCH \
-                      -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
-                      -d "${payload}" \
-                      "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones/${number}")
+                  -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
+                  -d "${payload}" \
+                  "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones/${number}")
                 echo "Update '${desired_title}' (#${number}) → HTTP ${st}"
               else
                 # CREATE; check collision on title
@@ -721,43 +713,41 @@ jobs:
                 payload=$(jq -n --arg title "${create_title}" --arg desc "${desired_desc}" --arg state "${gh_state}" --arg due "${due_on}" '
                   { title:$title, description:$desc, state:$state } + ( if $due != "" then { due_on:$due } else {} end ) ')
                 resp=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                       -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
-                       -d "${payload}" \
-                       "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
+                  -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
+                  -d "${payload}" \
+                  "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
                 http=$(echo "${resp}" | sed -n 's/^HTTP_STATUS://p')
 
                 if [[ "${http}" != "201" ]]; then
                   payload2=$(jq -n --arg title "${create_title}" --arg desc "${desired_desc}" --arg state "${gh_state}" \
-                               '{ title:$title, description:$desc, state:$state }')
+                    '{ title:$title, description:$desc, state:$state }')
                   resp2=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                          -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
-                          -d "${payload2}" \
-                          "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
+                    -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
+                    -d "${payload2}" \
+                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
                   http2=$(echo "${resp2}" | sed -n 's/^HTTP_STATUS://p')
                   echo "Create '${create_title}' → HTTP ${http} (retry without due_on → ${http2})"
-
                   if [[ "${http2}" == "201" ]]; then
                     newnum=$(echo "${resp2}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
                     jq -c --arg t "${create_title}" --arg n "${newnum}" \
-                       '. + { ($t): (try ($n|tonumber) catch $n) }' "${TITLE_FILE}" > "${TITLE_FILE}.tmp" && mv "${TITLE_FILE}.tmp" "${TITLE_FILE}"
+                      '. + { ($t): (try ($n|tonumber) catch $n) }' "${TITLE_FILE}" > "${TITLE_FILE}.tmp" && mv "${TITLE_FILE}.tmp" "${TITLE_FILE}"
                     jq -c --arg id "${gl_id}" --arg n "${newnum}" \
-                       '. + { ($id): (try ($n|tonumber) catch $n) }' "${GLID_FILE}" > "${GLID_FILE}.tmp" && mv "${GLID_FILE}.tmp" "${GLID_FILE}"
+                      '. + { ($id): (try ($n|tonumber) catch $n) }' "${GLID_FILE}" > "${GLID_FILE}.tmp" && mv "${GLID_FILE}.tmp" "${GLID_FILE}"
                   fi
                 else
                   echo "Create '${create_title}' → HTTP ${http}"
                   newnum=$(echo "${resp}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
                   jq -c --arg t "${create_title}" --arg n "${newnum}" \
-                     '. + { ($t): (try ($n|tonumber) catch $n) }' "${TITLE_FILE}" > "${TITLE_FILE}.tmp" && mv "${TITLE_FILE}.tmp" "${TITLE_FILE}"
+                    '. + { ($t): (try ($n|tonumber) catch $n) }' "${TITLE_FILE}" > "${TITLE_FILE}.tmp" && mv "${TITLE_FILE}.tmp" "${TITLE_FILE}"
                   jq -c --arg id "${gl_id}" --arg n "${newnum}" \
-                     '. + { ($id): (try ($n|tonumber) catch $n) }' "${GLID_FILE}" > "${GLID_FILE}.tmp" && mv "${GLID_FILE}.tmp" "${GLID_FILE}"
+                    '. + { ($id): (try ($n|tonumber) catch $n) }' "${GLID_FILE}" > "${GLID_FILE}.tmp" && mv "${GLID_FILE}.tmp" "${GLID_FILE}"
                 fi
               fi
-
               sleep 0.4
             done
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${next}" || "${next}" == "0" ]] && break
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
@@ -769,16 +759,16 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
         run: |
@@ -814,27 +804,26 @@ jobs:
         run: |
           set -euo pipefail
           GH_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" \
-                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100")
+            "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones?state=all&per_page=100")
 
           GLID_MAP=$(printf '%s' "${GH_LIST}" | jq -c '
             map(
-              select(.description)
-              | . as $m
+              select(.description) as $m
               | (.description | capture("GLMID:(?<id>[0-9]+)")? // null) as $cap
               | if $cap != null then { ($cap.id): $m.number } else {} end
             ) | add // {}')
 
           TITLE_MAP=$(printf '%s' "${GH_LIST}" | jq -c 'map({ ( .title ): .number }) | add // {}')
 
-          echo "glid_map=${GLID_MAP}"   >> "$GITHUB_OUTPUT"
+          echo "glid_map=${GLID_MAP}"  >> "$GITHUB_OUTPUT"
           echo "title_map=${TITLE_MAP}" >> "$GITHUB_OUTPUT"
 
       - name: Import issues (titles, body, labels, milestone, state, comments)
         env:
-          GH_REPO: ${{ steps.prep.outputs.gh_repo }}
-          GLID_MAP: ${{ steps.msmap.outputs.glid_map }}
+          GH_REPO:   ${{ steps.prep.outputs.gh_repo }}
+          GLID_MAP:  ${{ steps.msmap.outputs.glid_map }}
           TITLE_MAP: ${{ steps.msmap.outputs.title_map }}
-          GL_PROJECT: ${{ matrix.project }}
+          GL_PROJECT:${{ matrix.project }}
         run: |
           set -euo pipefail
           page=1
@@ -851,7 +840,7 @@ jobs:
 
             jq -c '.[]' "${RESP}" | while IFS= read -r iss; do
               title=$(printf '%s' "${iss}" | jq -r '.title')
-              body=$(printf '%s' "${iss}" | jq -r '.description // ""')
+              body=$(printf  '%s' "${iss}" | jq -r '.description // ""')
               state=$(printf '%s' "${iss}" | jq -r '.state')
               labels=$(printf '%s' "${iss}" | jq -c '.labels // []')
               ms_title=$(printf '%s' "${iss}" | jq -r '.milestone.title // ""')
@@ -913,7 +902,7 @@ jobs:
                   done
 
                   nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${CHDR}" | tr -d '\r')
-                  [[ -z "${nnext}" || "${nnext}" == "0" ]] && break
+                  [[ -z "${nnext:-}" || "${nnext}" == "0" ]] && break
                   cpage="${nnext}"
                 done
 
@@ -931,12 +920,11 @@ jobs:
                     "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${num}/labels" >/dev/null
                 fi
               fi
-
               sleep 0.3
             done
 
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${nnext}" || "${nnext}" == "0" ]] && break
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
             page="${next}"
           done
 
@@ -955,9 +943,9 @@ jobs:
       GH_PAT:   ${{ secrets.GH_PAT }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
       WORKDIR: /tmp/wiki-work
     steps:
       - name: Install git
@@ -1030,7 +1018,6 @@ jobs:
             echo "Open https://github.com/${GH_OWNER}/${GH_REPO}/wiki and click 'Create the first page' (Home)."
             exit 0
           fi
-
           git clone --mirror "${SRC_WIKI_URL}" src.wiki.git
           cd src.wiki.git
           git remote remove github 2>/dev/null || true
@@ -1054,10 +1041,10 @@ jobs:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
-      GL_GROUP:           ${{ vars.GL_GROUP }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker are available
         shell: bash
@@ -1068,7 +1055,8 @@ jobs:
             sudo apt-get install -y gnupg software-properties-common
             curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
             sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
             sudo apt-get update -y
             sudo apt-get install -y gh
           fi
@@ -1147,7 +1135,7 @@ jobs:
           mkdir -p "tmp/dry-run/${GH_REPO}"
           gh actions-importer dry-run gitlab \
             --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
-            --project "${GL_PROJECT##*/}" \
+            --project   "${GL_PROJECT##*/}" \
             --output-dir "tmp/dry-run/${GH_REPO}"
           echo "Converted workflow files are in tmp/dry-run/${GH_REPO}"
 
@@ -1179,10 +1167,10 @@ jobs:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
-      GL_GROUP:           ${{ vars.GL_GROUP }}
+      REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR:${{ vars.GH_REPO_SEPARATOR }}
+      GL_GROUP: ${{ vars.GL_GROUP }}
     steps:
       - name: Ensure GitHub CLI & Docker
         shell: bash
@@ -1193,7 +1181,8 @@ jobs:
             sudo apt-get install -y gnupg software-properties-common
             curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
             sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
             sudo apt-get update -y
             sudo apt-get install -y gh
           fi
@@ -1294,6 +1283,7 @@ jobs:
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+
           for i in {1..30}; do
             BR_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")
             BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
@@ -1304,12 +1294,14 @@ jobs:
             echo "No branches yet; waiting... (${i}/30)"
             sleep 3
           done
+
           BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
           [[ "${BR_LEN}" -lt 1 ]] && { echo "ERROR: No branches found after waiting."; exit 1; }
 
           CURRENT_DEFAULT=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')
           FIRST_BRANCH=$(jq -r '.[0].name' <<< "${BR_LIST}")
           HAS_DEFAULT=$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")
+
           if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
             echo "Updating default branch to '${FIRST_BRANCH}'"
             UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
@@ -1337,7 +1329,8 @@ jobs:
             --target-url "https://github.com/${GH_OWNER}/${GH_REPO}" \
             --output-dir "tmp/migrate/${GH_REPO}" \
             --namespace "${GL_GROUP:-${GL_PROJECT%/*}}" \
-            --project "${GL_PROJECT##*/}" | tee "${LOG_FILE}"
+            --project   "${GL_PROJECT##*/}" \
+            | tee "${LOG_FILE}"
           MIGRATE_RC=${PIPESTATUS[0]}
           set -e
 
