@@ -99,7 +99,7 @@ jobs:
       REPO_NAME_MODE:   ${{ vars.REPO_NAME_MODE }}
       GH_REPO_PREFIX:   ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-      AUTO_CREATE:      ${{ vars.AUTO_CREATE_REPO }}   # may be empty—treated as auto-create enabled
+      AUTO_CREATE:      ${{ vars.AUTO_CREATE_REPO }}   # empty/unset still creates
       INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }}
       WORKDIR: /tmp/mirror-work
     steps:
@@ -126,7 +126,6 @@ jobs:
           fi
           GH_REPO="${GH_REPO_PREFIX}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
-          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
       - name: Skip if destination repo is deletion-scheduled
         env:
@@ -571,7 +570,7 @@ jobs:
             page="${next}"
           done
 
-  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects (no '>' and no raw '&' in URL)
+  # 6) Repo Migration · 1.5 Milestone Sync — ALL projects (safe query & jq)
   repo_migration_milestone_sync_all:
     name: "6) Repo Migration · 1.5 Milestone Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all]
@@ -624,8 +623,6 @@ jobs:
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-
-            # Build query with curl -G to avoid raw '&'
             if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" -G \
               --data-urlencode "per_page=100" --data-urlencode "page=${page}" \
               "${GL_API}/projects/${GL_ENC}/milestones" > "${RESP}"; then
@@ -639,7 +636,6 @@ jobs:
               description=$(printf '%s' "${ms}" | jq -r '.description // ""')
               due=$(printf '%s' "${ms}" | jq -r '.due_date // ""')
 
-              # Include due_on only when due is non-empty (no '>' operator)
               payload=$(jq -n --arg title "${title}" --arg desc "${description}" --arg due "${due}" '
                 if ($due == "") then
                   {title:$title, description:$desc}
@@ -648,12 +644,10 @@ jobs:
                 end')
 
               status=$(curl -s -o /dev/null -w "%{http_code}" \
-                -H "Authorization: Bearer ${GH_PAT}" \
-                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
                 -H "Content-Type: application/json" \
                 -d "${payload}" \
                 "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/milestones")
-
               echo "Milestone ${title} status: ${status}"
               sleep 1
             done
@@ -663,7 +657,7 @@ jobs:
             page="${next}"
           done
 
-  # 6a) Repo Migration · 1.6 Issue Sync — ALL projects
+  # 6a) Repo Migration · 1.6 Issue Sync — ALL projects (safe query & jq)
   repo_migration_issue_sync_all:
     name: "6a) Repo Migration · 1.6 Issue Sync (ALL projects)"
     needs: [discover_projects, repo_migration_label_sync_all, repo_migration_milestone_sync_all]
@@ -729,8 +723,6 @@ jobs:
           page=1
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-
-            # Use curl -G to safely add query parameters (no raw '&')
             curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" -G \
               --data-urlencode "scope=all" \
               --data-urlencode "per_page=100" \
@@ -750,14 +742,12 @@ jobs:
               iid=$(printf '%s' "${iss}" | jq -r '.iid')
               confidential=$(printf '%s' "${iss}" | jq -r '.confidential')
 
-              # Map milestone title → number (avoid '>' by checking != "")
               ms_num=$(jq -r --arg t "${ms_title}" --argjson map "${MS_MAP}" \
                        'if ($t != "" and ($map[$t])) then $map[$t] else empty end')
 
               gl_url="${GL_URL%/}/${GL_PROJECT}/-/issues/${iid}"
               gh_body="**Imported from GitLab by @${author}**\n\n${body}\n\n---\n_Source_: ${gl_url}"
 
-              # Prepare payload; test type of $msnum correctly (no '?')
               payload=$(jq -n --arg title "${title}" --arg body "${gh_body}" \
                             --argjson labels "${labels}" --arg marker "imported:gitlab" \
                             --argjson msnum "${ms_num:-null}" '
@@ -772,7 +762,6 @@ jobs:
               echo "Issue create status=${http} number=${num}"
 
               if [[ -n "${num}" ]]; then
-                # Comments (notes) – only user comments; use curl -G for pagination
                 cpage=1
                 while true; do
                   CRESP=$(mktemp) ; CHDR=$(mktemp)
@@ -798,7 +787,6 @@ jobs:
                   cpage="${nnext}"
                 done
 
-                # Close the issue if needed
                 if [[ "${state}" == "closed" ]]; then
                   curl -s -o /dev/null -w "%{http_code}" \
                     -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
@@ -806,7 +794,6 @@ jobs:
                     "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${num}" >/dev/null
                 fi
 
-                # Flag confidential issues
                 if [[ "${confidential}" == "true" ]]; then
                   curl -s -o /dev/null -w "%{http_code}" \
                     -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
@@ -904,18 +891,14 @@ jobs:
           SRC_WIKI_URL="https://oauth2:${GL_TOKEN}@${HOST}/${{ matrix.project }}.wiki.git"
           DEST_WIKI_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.wiki.git"
 
-          # Probe GitLab wiki; if it doesn't exist, skip gracefully
           if ! git ls-remote "${SRC_WIKI_URL}" &>/dev/null; then
             echo "No GitLab wiki found for ${{ matrix.project }} — skipping."
             exit 0
           fi
 
-          # Probe destination wiki; if not initialized, show actionable warning and skip
           if ! git ls-remote "${DEST_WIKI_URL}" &>/dev/null; then
             echo "::warning::GitHub wiki for ${GH_OWNER}/${GH_REPO} is not initialized yet."
             echo "Open https://github.com/${GH_OWNER}/${GH_REPO}/wiki and click 'Create the first page' (Home)."
-            echo "GitHub creates the .wiki.git repository only after the first page exists."
-            echo "This is a one-time UI step; subsequent runs will mirror the wiki."
             exit 0
           fi
 
@@ -1002,7 +985,6 @@ jobs:
           fi
           GH_REPO="${PREF}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
-          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
       - name: Skip if destination repo is deletion-scheduled
         shell: bash
@@ -1064,7 +1046,7 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      GH_PAT:   ${{ secrets.GH_PAT }}   # PAT classic with repo+workflow scopes recommended
+      GH_PAT:   ${{ secrets.GH_PAT }}
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GL_URL:   ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
@@ -1127,7 +1109,6 @@ jobs:
           fi
           GH_REPO="${PREF}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
-          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
       - name: Skip if destination repo is deletion-scheduled
         shell: bash
@@ -1162,7 +1143,6 @@ jobs:
           if [[ "${STATUS}" == "200" ]]; then
             echo "Repo ${GH_OWNER}/${GH_REPO} exists."
           else
-            echo "Repo ${GH_OWNER}/${GH_REPO} not found (HTTP ${STATUS}); creating..."
             MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
             if [[ "${GH_OWNER}" == "${MY_LOGIN}" ]]; then
               CREATE_URL="https://api.github.com/user/repos"
@@ -1185,7 +1165,6 @@ jobs:
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
-          # Wait for branches to appear (mirror job may still be pushing)
           for i in {1..30}; do
             BR_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")
             BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
@@ -1197,14 +1176,14 @@ jobs:
             sleep 3
           done
           BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
-          [[ "${BR_LEN}" -lt 1 ]] && { echo "ERROR: No branches found after waiting. Mirror push may have failed or dest uninitialized."; exit 1; }
+          [[ "${BR_LEN}" -lt 1 ]] && { echo "ERROR: No branches found after waiting."; exit 1; }
 
           CURRENT_DEFAULT=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')
           FIRST_BRANCH=$(jq -r '.[0].name' <<< "${BR_LIST}")
           HAS_DEFAULT=$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")
 
           if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
-            echo "Updating default branch to '${FIRST_BRANCH}' (existing branch)."
+            echo "Updating default branch to '${FIRST_BRANCH}'"
             UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
               -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
               -d "{\"default_branch\":\"${FIRST_BRANCH}\"}" "${API}")
@@ -1224,7 +1203,6 @@ jobs:
           mkdir -p "tmp/migrate/${GH_REPO}"
           LOG_FILE="$(mktemp)"
 
-          # Run migrate and capture the actual exit code of 'gh' (not tee)
           set +e
           gh actions-importer migrate gitlab \
             --target-url "https://github.com/${GH_OWNER}/${GH_REPO}" \
@@ -1234,22 +1212,18 @@ jobs:
           MIGRATE_RC=${PIPESTATUS[0]}
           set -e
 
-          # Extract PR URL from logs (strip any CR characters)
           PR_URL=$(grep -Eo "https://github.com/.+/pull/[0-9]+" "${LOG_FILE}" | tr -d '\r' | tail -n1 || true)
           if [[ -n "${PR_URL}" ]]; then
             echo "::notice::PR opened: ${PR_URL}"
-            printf 'migration_pr_url=%s\n' "${PR_URL}" >> "$GITHUB_OUTPUT"
-            # ✅ Mark the job successful and stop right away
+            printf 'migration_pr_url=%s\n' "${PR_URL}" | tee -a "$GITHUB_OUTPUT" >/dev/null
             exit 0
           fi
 
-          # If migrate succeeded but produced no PR (e.g., no changes), still mark green
           if [[ "${MIGRATE_RC}" -eq 0 ]]; then
             echo "::notice::No PR created (possibly no changes needed). Marking job successful."
             exit 0
           fi
 
-          # Otherwise, fail the job and show context
           echo "ERROR: Migration failed (exit ${MIGRATE_RC})."
           head -n 100 "${LOG_FILE}" || true
           exit "${MIGRATE_RC}"
