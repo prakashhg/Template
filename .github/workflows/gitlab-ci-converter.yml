@@ -1220,6 +1220,7 @@ jobs:
           include-hidden-files: false
 
   # 8) GitLab CI → GitHub Actions (production: open ONE PR with ALL conversions, preserving filenames)
+  
   ci_migration_migrate_all:
     name: "8) ${{ matrix.project }} · GitLab CI → Actions (single PR; preserve filenames)"
     needs: [discover_projects, repo_migration_commit_sync_all, ci_migration_dry_run_all]
@@ -1233,13 +1234,14 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      GH_PAT:   ${{ secrets.GH_PAT }}     # PAT classic with repo+workflow
+      GH_PAT: ${{ secrets.GH_PAT }} # PAT classic with repo+workflow
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GL_URL:   ${{ vars.GL_URL }}
+      GL_URL: ${{ vars.GL_URL }}
       GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+      REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+
     steps:
       - name: Ensure GitHub CLI & Docker
         run: |
@@ -1311,22 +1313,25 @@ jobs:
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${API}")
+          STATUS="$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${API}")"
           if [[ "${STATUS}" == "200" ]]; then
             echo "Repo ${GH_OWNER}/${GH_REPO} exists."
           else
-            MY_LOGIN=$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')
+            MY_LOGIN="$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')"
             if [[ "${GH_OWNER}" == "${MY_LOGIN}" ]]; then
               CREATE_URL="https://api.github.com/user/repos"
             else
               CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
             fi
-            PAYLOAD=$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')
-            RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
+            PAYLOAD="$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')"
+            RESP="$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
               -H "Accept: application/vnd.github+json" -H "Content-Type: application/json" \
-              -d "${PAYLOAD}" "${CREATE_URL}")
-            HTTP=$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')
-            [[ "${HTTP}" == "201" ]] || { echo "ERROR: Create repo failed (HTTP ${HTTP})"; exit 1; }
+              -d "${PAYLOAD}" "${CREATE_URL}")"
+            HTTP="$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')"
+            if [[ "${HTTP}" != "201" ]]; then
+              echo "ERROR: Create repo failed (HTTP ${HTTP})"
+              exit 1
+            fi
             echo "Created https://github.com/${GH_OWNER}/${GH_REPO}"
           fi
 
@@ -1337,8 +1342,8 @@ jobs:
           set -euo pipefail
           API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
           for i in {1..30}; do
-            BR_LIST=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")
-            BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
+            BR_LIST="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}/branches?per_page=100")"
+            BR_LEN="$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)"
             if [[ "${BR_LEN}" -ge 1 ]]; then
               echo "Branch(es) detected: ${BR_LEN}"
               break
@@ -1346,17 +1351,23 @@ jobs:
             echo "No branches yet; waiting... (${i}/30)"
             sleep 3
           done
-          BR_LEN=$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)
-          [[ "${BR_LEN}" -lt 1 ]] && { echo "ERROR: No branches found after waiting. Mirror push may have failed or dest uninitialized."; exit 1; }
-          CURRENT_DEFAULT=$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')
-          FIRST_BRANCH=$(jq -r '.[0].name' <<< "${BR_LIST}")
-          HAS_DEFAULT=$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")
+          BR_LEN="$(jq 'length' <<< "${BR_LIST}" 2>/dev/null || echo 0)"
+          if [[ "${BR_LEN}" -lt 1 ]]; then
+            echo "ERROR: No branches found after waiting. Mirror push may have failed or dest uninitialized."
+            exit 1
+          fi
+          CURRENT_DEFAULT="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // empty')"
+          FIRST_BRANCH="$(jq -r '.[0].name' <<< "${BR_LIST}")"
+          HAS_DEFAULT="$(jq --arg d "${CURRENT_DEFAULT}" '[ .[].name ] | any(. == $d)' <<< "${BR_LIST}")"
           if [[ -z "${CURRENT_DEFAULT}" || "${CURRENT_DEFAULT}" == "null" || "${HAS_DEFAULT}" != "true" ]]; then
             echo "Updating default branch to '${FIRST_BRANCH}' (existing branch)."
-            UPDATE_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-              -d "{\"default_branch\":\"${FIRST_BRANCH}\"}" "${API}")
-            [[ "${UPDATE_HTTP}" == "200" ]] || { echo "ERROR: Failed to update default branch (HTTP ${UPDATE_HTTP})."; exit 1; }
+            UPDATE_HTTP="$(curl -s -o /dev/null -w "%{http_code}" -X PATCH \
+              -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+              -d "{\"default_branch\":\"${FIRST_BRANCH}\"}" "${API}")"
+            if [[ "${UPDATE_HTTP}" != "200" ]]; then
+              echo "ERROR: Failed to update default branch (HTTP ${UPDATE_HTTP})."
+              exit 1
+            fi
           else
             echo "Default branch '${CURRENT_DEFAULT}' exists; continuing."
           fi
@@ -1378,34 +1389,37 @@ jobs:
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
+          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x@uri')"
           DEFAULT_BRANCH="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${GL_ENC}" | jq -r '.default_branch // "main"')"
+
           files=()
           next_page="1"
           while [[ -n "${next_page}" && "${next_page}" != "0" ]]; do
-            RESP=$(mktemp); HDR=$(mktemp)
+            RESP="$(mktemp)"; HDR="$(mktemp)"
             curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
               "${GL_API}/projects/${GL_ENC}/repository/tree?ref=${DEFAULT_BRANCH}&recursive=true&per_page=100&page=${next_page}" > "${RESP}"
+
             while read -r item; do
-              t=$(jq -r '.type' <<<"${item}")
+              t="$(jq -r '.type' <<<"${item}")"
               [[ "${t}" == "blob" ]] || continue
-              p=$(jq -r '.path' <<<"${item}")
-              n=$(jq -r '.name' <<<"${item}")
+              p="$(jq -r '.path' <<<"${item}")"
+              n="$(jq -r '.name' <<<"${item}")"
               if [[ "${n}" =~ ^\.gitlab.*\.(yml|yaml)$ || "${p}" =~ \/.gitlab\/.+\.(yml|yaml)$ || "${p}" == ".gitlab-ci.yml" ]]; then
                 files+=("${p}")
               fi
             done < <(jq -c '.[]' "${RESP}")
-            next_page=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
+
+            next_page="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
             [[ -z "${next_page}" ]] && next_page="0"
           done
 
           if [[ "${#files[@]}" -eq 0 ]]; then
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "list=[]"     >> "$GITHUB_OUTPUT"
+            echo "list=[]" >> "$GITHUB_OUTPUT"
             echo "::notice::${GL_PROJECT}: No .gitlab* CI files found; skipping migration."
             exit 0
           else
-            json=$(printf '%s\n' "${files[@]}" | jq -R . | jq -s -c .)
+            json="$(printf '%s\n' "${files[@]}" | jq -R . | jq -s -c .)"
             echo "found=true" >> "$GITHUB_OUTPUT"
             echo "list=${json}" >> "$GITHUB_OUTPUT"
             echo "Found CI files:"; printf ' - %s\n' "${files[@]}"
@@ -1414,7 +1428,7 @@ jobs:
           # Download all source CI files
           mapfile -t files < <(jq -r '.[]' <<< "${json}")
           for f in "${files[@]}"; do
-            enc=$(jq -rn --arg x "${f}" '$x|@uri')
+            enc="$(jq -rn --arg x "${f}" '$x@uri')"
             mkdir -p "$(dirname "${f}")"
             curl --fail -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
               "${GL_API}/projects/${GL_ENC}/repository/files/${enc}/raw?ref=${DEFAULT_BRANCH}" \
@@ -1426,13 +1440,13 @@ jobs:
         id: args
         env:
           GL_PROJECT: ${{ matrix.project }}
-          GL_GROUP:   ${{ vars.GL_GROUP }}
+          GL_GROUP: ${{ vars.GL_GROUP }}
         run: |
           set -euo pipefail
           NS="${GL_GROUP:-${GL_PROJECT%/*}}"
           PRJ="${GL_PROJECT##*/}"
           echo "namespace=${NS}" >> "$GITHUB_OUTPUT"
-          echo "project=${PRJ}"  >> "$GITHUB_OUTPUT"
+          echo "project=${PRJ}" >> "$GITHUB_OUTPUT"
 
       - name: Convert ALL CI files (dry-run again) to a staging folder
         if: steps.files.outputs.found == 'true'
@@ -1441,7 +1455,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "tmp/converted/${GH_REPO}"
-          mapfile -t files < <(jq -r '.[]' <<< '${{ steps.files.outputs.list }}')
+          mapfile -t files < <(jq -r '.[]' <<<'${{ steps.files.outputs.list }}')
           for f in "${files[@]}"; do
             out_dir="tmp/converted/${GH_REPO}/$(echo "${f}" | tr '/:' '_')"
             mkdir -p "${out_dir}"
@@ -1453,160 +1467,123 @@ jobs:
             echo "::notice::Converted ${f} -> ${out_dir}"
           done
 
-      
-      - name: Stage converted workflows for ALL base branches (preserve filenames)
-        id: stage_all
+      # -------- NEW: single-head, single-PR flow --------
+      - name: Stage converted workflows on DEFAULT branch (single PR)
+        id: stage_single
         env:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
           GH_OWNER: ${{ env.GH_OWNER }}
           GH_PAT: ${{ secrets.GH_PAT }}
+          HEAD_BRANCH_NAME: ${{ env.HEAD_BRANCH_NAME }} # optional override
         shell: bash
         run: |
           set -euo pipefail
-
-          git config --global user.name "actions-bot"
+          git config --global user.name  "actions-bot"
           git config --global user.email "actions-bot@users.noreply.github.com"
 
-          # Prepare a clean working copy
+          API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+          DEFAULT_BRANCH="$(curl -s -H "Authorization: Bearer ${GH_PAT}" "${API}" | jq -r '.default_branch // "main"')"
+          echo "Default branch is: ${DEFAULT_BRANCH}"
+
+          HEAD="${HEAD_BRANCH_NAME:-ci-migration/all-branches/all-gitlab-ci-files}"
+          echo "Using head branch: ${HEAD}"
+
           rm -rf repo && mkdir repo
           git -C repo init
           git -C repo remote add origin "https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
           git -C repo fetch origin --prune --tags
+          git -C repo checkout -B "${HEAD}" "origin/${DEFAULT_BRANCH}"
 
-          # Discover all destination branches
-          BR_LIST_JSON="$(gh api "repos/${GH_OWNER}/${GH_REPO}/branches?per_page=100")"
-          mapfile -t BASE_BRANCHES < <(jq -r '.[].name' <<<"$BR_LIST_JSON")
-          if [ "${#BASE_BRANCHES[@]}" -eq 0 ]; then
-            echo "ERROR: No branches found in destination; mirror push may have failed." >&2
-            exit 1
-          fi
-
-          # Allow optional filtering via env/vars (e.g., exclude gh-pages)
-          BRANCH_INCLUDE_REGEX="${BRANCH_INCLUDE_REGEX:-.*}"  # match all by default
-          BRANCH_EXCLUDE_REGEX="${BRANCH_EXCLUDE_REGEX:-^$}" # match none by default
-
+          rm -rf repo/.github/workflows
           mkdir -p repo/.github/workflows
           : > repo/staging-map.txt
-          : > repo/created-branches.txt
 
-          # Materialize converted files list once
-          mapfile -t SRC_FILES < <(jq -r '.[]' <<< '${{ steps.files.outputs.list }}')
+          mapfile -t SRC_FILES < <(jq -r '.[]' <<<'${{ steps.files.outputs.list }}')
 
-          for BASE in "${BASE_BRANCHES[@]}"; do
-            # Apply filters
-            if ! [[ "$BASE" =~ $BRANCH_INCLUDE_REGEX ]]; then
-              echo "::notice::Skipping base '$BASE' (does not match BRANCH_INCLUDE_REGEX='$BRANCH_INCLUDE_REGEX')."
-              continue
-            fi
-            if [[ "$BASE" =~ $BRANCH_EXCLUDE_REGEX ]]; then
-              echo "::notice::Skipping base '$BASE' (matches BRANCH_EXCLUDE_REGEX='$BRANCH_EXCLUDE_REGEX')."
-              continue
+          declare -A used=()
+          changes=0
+          for f in "${SRC_FILES[@]}"; do
+            SRC_DIR="tmp/converted/${GH_REPO}/$(echo "$f" | tr '/:' '_')"
+            SRC_YAML="$(find "${SRC_DIR}/" -type f -path "*/.github/workflows/*" \( -name '*.yml' -o -name '*.yaml' \) | head -n1)"
+
+            if [[ -z "${SRC_YAML:-}" || ! -s "$SRC_YAML" ]]; then
+              echo "ERROR: No workflow YAML produced for source '$f'." >&2
+              exit 1
             fi
 
-            HEAD="ci-migration/${BASE}/all-gitlab-ci-files"
-            echo ">> Preparing PR head '$HEAD' based on 'origin/${BASE}'"
+            base="$(basename "$f")"
+            dest="repo/.github/workflows/${base}"
 
-            # Checkout per-base head
-            git -C repo checkout -B "$HEAD" "origin/${BASE}"
-
-            # Re-stage workflows fresh for this branch
-            git -C repo rm -rf --cached .github/workflows || true
-            rm -rf repo/.github/workflows
-            mkdir -p repo/.github/workflows
-
-            declare -A used=()
-            for f in "${SRC_FILES[@]}"; do
-              SRC_DIR="tmp/converted/${GH_REPO}/$(echo "$f" | tr '/:' '_')"
-              # Find the generated workflow YAML under .github/workflows
-              SRC_YAML="$(find "${SRC_DIR}/" -type f -path "*/.github/workflows/*" \( -name '*.yml' -o -name '*.yaml' \) | head -n1)"
-              if [ -z "${SRC_YAML:-}" ] || [ ! -s "$SRC_YAML" ]; then
-                echo "ERROR: No workflow YAML produced for source '$f'." >&2
-                exit 1
+            if [[ -n "${used[$base]:-}" ]]; then
+              suffix="$(echo "${f%/*}" | tr '/.' '-' | sed 's/^-//;s/-$//;s/[^A-Za-z0-9-]//g')"
+              [[ -z "$suffix" ]] && suffix="$(echo -n "$f" | sha1sum | cut -c1-6)"
+              ext="${base##*.}"; name="${base%.*}"
+              dest="repo/.github/workflows/${name}-${suffix}.${ext}"
+              if [[ -n "${used[$(basename "$dest")]:-}" ]]; then
+                short="$(echo -n "$f" | sha1sum | cut -c1-6)"
+                dest="repo/.github/workflows/${name}-${short}.${ext}"
               fi
+            fi
 
-              base="$(basename "$f")"             # preserve original GitLab CI filename
-              dest="repo/.github/workflows/${base}"
-
-              if [[ -n "${used[$base]:-}" ]]; then
-                # Collision handling: derive readable suffix from original path; fallback short hash
-                suffix="$(echo "${f%/*}" | tr '/.' '-' | sed 's/^-//;s/-$//;s/[^A-Za-z0-9-]//g')"
-                [[ -z "$suffix" ]] && suffix="$(echo -n "$f" | sha1sum | cut -c1-6)"
-                ext="${base##*.}"
-                name="${base%.*}"
-                dest="repo/.github/workflows/${name}-${suffix}.${ext}"
-                if [[ -n "${used[$(basename "$dest")]:-}" ]]; then
-                  short="$(echo -n "$f" | sha1sum | cut -c1-6)"
-                  dest="repo/.github/workflows/${name}-${short}.${ext}"
-                fi
-              fi
-
-              used["$(basename "$dest")"]=1
-              cp -f "$SRC_YAML" "$dest"
-              echo "$f -> ${dest#repo/}" >> repo/staging-map.txt
-            done
-
-            git -C repo add .github/workflows
-            # If nothing changed relative to BASE, commit may be empty; tolerate
-            git -C repo commit -m "GitLab CI → GitHub Actions: add converted workflows (preserve filenames) for base '${BASE}'" || true
-
-            # Push head
-            git -C repo push -u origin "$HEAD"
-            echo "${BASE} ${HEAD}" >> repo/created-branches.txt
+            used["$(basename "$dest")"]=1
+            cp -f "$SRC_YAML" "$dest"
+            echo "$f -> ${dest#repo/}" >> repo/staging-map.txt
+            ((changes++))
           done
 
-          # Emit base↔head mapping as JSON for next step
-          jq -R -s -c 'split("\n") | map(select(length>0)) | map(split(" ")) | map({"base": .[0], "head": .[1]})' < repo/created-branches.txt \
-            | sed 's/^/branch_map=/' >> "$GITHUB_OUTPUT"
+          if [[ "${changes}" -eq 0 ]]; then
+            echo "::notice::No workflow changes detected; skipping PR creation."
+            echo "base=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "head=${HEAD}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-      - name: Open pull requests for ALL base branches (skips duplicates)
+          git -C repo add .github/workflows
+          git -C repo commit -m "GitLab CI → GitHub Actions: add converted workflows (single PR; preserve filenames)" || true
+          git -C repo push -u origin "${HEAD}"
+
+          echo "base=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "head=${HEAD}" >> "$GITHUB_OUTPUT"
+
+      - name: Open SINGLE pull request (skips duplicate)
         env:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
           GH_OWNER: ${{ env.GH_OWNER }}
         shell: bash
         run: |
           set -euo pipefail
+          BASE="${{ steps.stage_single.outputs.base }}"
+          HEAD="${{ steps.stage_single.outputs.head }}"
 
-          BRANCH_MAP='${{ steps.stage_all.outputs.branch_map }}'
-          count="$(jq 'length' <<<"$BRANCH_MAP")"
-          if [ "${count}" -lt 1 ]; then
-            echo "::warning::No migration head branches were created; nothing to open."
+          if [[ -z "${BASE}" || -z "${HEAD}" ]]; then
+            echo "::error::Missing base/head from previous step."
+            exit 1
+          fi
+
+          EXISTING="$(gh pr list --repo "${GH_OWNER}/${GH_REPO}" --head "${HEAD}" --json url --jq '.[0].url')"
+          if [[ -n "${EXISTING:-}" ]]; then
+            echo "::notice::PR already exists for head '${HEAD}': ${EXISTING}"
             exit 0
           fi
 
+          TITLE="GitLab CI → Actions: single PR (all converted files) into '${BASE}'"
           BODY="$(cat <<'EOF'
-          This PR was generated by the orchestrator to migrate all discovered `.gitlab*` CI files
-          into GitHub Actions workflows, preserving original filenames.
+This PR was generated by the orchestrator to migrate **all** discovered `.gitlab*` CI files
+into GitHub Actions workflows, preserving original filenames.
 
-          **What changed**
-          - All converted workflows were staged under `.github/workflows/` using the same basename as the source file.
-          - If two source files shared a basename, a readable suffix (derived from the original path) or a short hash was added.
+**What changed**
+- All converted workflows were staged under `.github/workflows/` using the same basename as the source file.
+- If two source files shared a basename, a readable suffix (derived from the original path) or a short hash was added.
 
-          **Notes**
-          - Review for any manual follow‑up the importer mentions (secrets, runners, environments, rulesets, etc.).
-          - YAMLs were produced via `gh actions-importer dry-run gitlab`. Each PR aggregates ALL changes for its base branch.
-          See `repo/staging-map.txt` for source → destination mapping.
-          EOF
-          )"
-
-          for i in $(seq 0 $((count-1))); do
-            BASE="$(jq -r ".[$i].base" <<<"$BRANCH_MAP")"
-            HEAD="$(jq -r ".[$i].head" <<<"$BRANCH_MAP")"
-
-            # Avoid duplicate PR if a PR for this head already exists
-            EXISTING="$(gh pr list --repo "${GH_OWNER}/${GH_REPO}" --head "${HEAD}" --json url --jq '.[0].url')"
-            if [ -n "${EXISTING:-}" ]; then
-              echo "::notice::PR already exists for head '${HEAD}': ${EXISTING}"
-              continue
-            fi
-
-            TITLE="GitLab CI → Actions: single PR (all converted files) to '${BASE}'"
-            gh pr create \
-              --repo "${GH_OWNER}/${GH_REPO}" \
-              --base "${BASE}" \
-              --head "${HEAD}" \
-              --title "${TITLE}" \
-              --body "${BODY}"
-
-            # Small delay to avoid abuse rate-limiting on large branch sets
-            sleep 1
-          done
+**Notes**
+- Review for any manual follow‑ups the importer mentions (secrets, runners, environments, rulesets, etc.).
+- YAMLs were produced via `gh actions-importer dry-run gitlab`. This is a single PR covering the entire repository.
+See `repo/staging-map.txt` for source → destination mapping.
+EOF
+)"
+          gh pr create \
+            --repo "${GH_OWNER}/${GH_REPO}" \
+            --base "${BASE}" \
+            --head "${HEAD}" \
+            --title "${TITLE}" \
+            --body "${BODY}"
