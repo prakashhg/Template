@@ -1221,6 +1221,7 @@ jobs:
 
   # 8) GitLab CI → GitHub Actions (production: open ONE PR with ALL conversions, preserving filenames)
   
+  
   ci_migration_migrate_all:
     name: "8) ${{ matrix.project }} · GitLab CI → Actions (single PR; preserve filenames)"
     needs: [discover_projects, repo_migration_commit_sync_all, ci_migration_dry_run_all]
@@ -1375,7 +1376,7 @@ jobs:
       - name: Configure importer via .env.local
         run: |
           set -euo pipefail
-          cat > .env.local <<EOF
+          cat > .env.local <<'EOF'
           GITHUB_ACCESS_TOKEN=${GH_PAT}
           GITHUB_INSTANCE_URL=https://github.com
           GITLAB_ACCESS_TOKEN=${GL_TOKEN}
@@ -1455,7 +1456,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "tmp/converted/${GH_REPO}"
-          mapfile -t files < <(jq -r '.[]' <<<'${{ steps.files.outputs.list }}')
+          FILES_JSON="${{ steps.files.outputs.list }}"
+          mapfile -t files < <(jq -r '.[]' <<< "${FILES_JSON}")
           for f in "${files[@]}"; do
             out_dir="tmp/converted/${GH_REPO}/$(echo "${f}" | tr '/:' '_')"
             mkdir -p "${out_dir}"
@@ -1498,7 +1500,8 @@ jobs:
           mkdir -p repo/.github/workflows
           : > repo/staging-map.txt
 
-          mapfile -t SRC_FILES < <(jq -r '.[]' <<<'${{ steps.files.outputs.list }}')
+          SRC_FILES_JSON="${{ steps.files.outputs.list }}"
+          mapfile -t SRC_FILES < <(jq -r '.[]' <<< "${SRC_FILES_JSON}")
 
           declare -A used=()
           changes=0
