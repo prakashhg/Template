@@ -1610,3 +1610,205 @@ jobs:
             # Small delay to avoid abuse rate-limiting on large branch sets
             sleep 1
           done
+  # 9) Repo Migration · 1.8 CI/CD Variables Sync — ALL projects
+  ci_cd_variable_sync_all:
+    name: "9) GitLab CI/CD variables → GitHub secrets/variables (ALL projects)"
+    needs: [discover_projects, repo_migration_commit_sync_all]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    env:
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:   ${{ secrets.GH_PAT }}
+      GL_URL:   ${{ vars.GL_URL }}
+      GH_OWNER: ${{ vars.GH_OWNER }}
+      REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
+      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+      GL_GROUP: ${{ vars.GL_GROUP }}
+
+    steps:
+      - name: Install jq & gh
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+          if ! command -v gh >/dev/null 2>&1; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            sudo apt-get update -y && sudo apt-get install -y gh
+          fi
+          echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
+          gh auth status
+
+      - name: Compute destination repo name
+        id: repo
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          MODE="${REPO_NAME_MODE:-path}"
+          PREF="${GH_REPO_PREFIX:-}"
+          SEP="${GH_REPO_SEPARATOR:-"-"}"
+          if [[ "${MODE}" == "fullpath" ]]; then
+            base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
+          else
+            base="${GL_PROJECT##*/}"
+          fi
+          GH_REPO="${PREF}${base}"
+          echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare GitLab API & encodings
+        id: prep
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          # Correct jq formatter usage: pipe value into @uri
+          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
+          GROUP_ENC="$(jq -rn --arg x "${GL_GROUP:-}" '$x|@uri')"
+          echo "GL_API=${GL_API}"   >> "$GITHUB_ENV"
+          echo "GL_ENC=${GL_ENC}"   >> "$GITHUB_ENV"
+          echo "GROUP_ENC=${GROUP_ENC}" >> "$GITHUB_ENV"
+
+      - name: Fetch group & project variables (pagination + precedence)
+        id: vars
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          : "${GL_API:?}"; : "${GL_ENC:?}"
+          G_LIST="$(mktemp)"; P_LIST="$(mktemp)"
+          : > "${G_LIST}"; : > "${P_LIST}"
+
+          # Group variables (optional)
+          if [[ -n "${GROUP_ENC:-}" ]]; then
+            page="1"
+            while [[ -n "${page}" && "${page}" != "0" ]]; do
+              RESP="$(mktemp)"; HDR="$(mktemp)"
+              if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                   "${GL_API}/groups/${GROUP_ENC}/variables?per_page=100&page=${page}" > "${RESP}"; then
+                break
+              fi
+              if [[ "$(jq -r 'type' "${RESP}")" == "array" ]]; then
+                jq -c '.[] | . + {source:"group"}' "${RESP}" >> "${G_LIST}"
+              fi
+              page="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
+              [[ -z "${page}" ]] && page="0"
+            done
+          fi
+
+          # Project variables
+          page="1"
+          while [[ -n "${page}" && "${page}" != "0" ]]; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                 "${GL_API}/projects/${GL_ENC}/variables?per_page=100&page=${page}" > "${RESP}"; then
+              echo "WARN: Could not list project variables for ${GL_ENC}"
+              break
+            fi
+            if [[ "$(jq -r 'type' "${RESP}")" == "array" ]]; then
+              jq -c '.[] | . + {source:"project"}' "${RESP}" >> "${P_LIST}"
+            fi
+            page="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
+            [[ -z "${page}" ]] && page="0"
+          done
+
+          # Combine: project wins over group for the same key|env_scope
+          G_ARR="$(mktemp)"; P_ARR="$(mktemp)"; COMB="$(mktemp)"
+          jq -s '.' "${G_LIST}" > "${G_ARR}" || echo '[]' > "${G_ARR}"
+          jq -s '.' "${P_LIST}" > "${P_ARR}" || echo '[]' > "${P_ARR}"
+
+          jq -n --argjson g "$(cat "${G_ARR}")" --argjson p "$(cat "${P_ARR}")" '
+            def k($v): ($v.key + "|" + ($v.environment_scope // "*"));
+            def to_map($a): reduce $a[] as $v ({}; .[k($v)] = $v);
+            (to_map($g) + to_map($p))            # project overrides group
+            | to_entries | map(.value)
+          ' > "${COMB}"
+
+          COUNT="$(jq 'length' "${COMB}")"
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+          echo "list=$(jq -c '.' "${COMB}")" >> "$GITHUB_OUTPUT"
+
+      - name: Upsert to GitHub (repo/env secrets & variables); create environments as needed
+        if: steps.vars.outputs.count != '0'
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          REPO_SLUG="${GH_OWNER}/${GH_REPO}"
+          LIST_JSON='${{ steps.vars.outputs.list }}'
+          REPORT="$(mktemp)"
+
+          echo '[]' > "${REPORT}"
+          mapfile -t items < <(jq -c '.[]' <<< "${LIST_JSON}")
+          for it in "${items[@]}"; do
+            key=$(jq -r '.key' <<< "${it}")
+            envscope=$(jq -r '.environment_scope // "*"' <<< "${it}")
+            vtype=$(jq -r '.variable_type // "env_var"' <<< "${it}")
+            masked=$(jq -r '.masked // false' <<< "${it}")
+            hidden=$(jq -r '.hidden // false' <<< "${it}")
+
+            # Decide destination: secret vs variable
+            is_secret="false"
+            if [[ "${masked}" == "true" || "${hidden}" == "true" || "${vtype}" == "file" ]]; then
+              is_secret="true"
+            fi
+
+            # value via temp file to keep logs clean
+            valf="$(mktemp)"
+            jq -r '.value' <<< "${it}" > "${valf}"
+
+            # ensure environment (if scoped)
+            level="repo"
+            if [[ "${envscope}" != "*" ]]; then
+              level="environment:${envscope}"
+              # Minimal PUT: do NOT send wait_timer or protection rules on plans that don't support them
+              gh api \
+                --method PUT \
+                -H "Accept: application/vnd.github+json" \
+                "repos/${REPO_SLUG}/environments/${envscope}" \
+                >/dev/null
+            fi
+
+            # Upsert
+            if [[ "${is_secret}" == "true" ]]; then
+              if [[ "${level}" == "repo" ]]; then
+                gh secret set "${key}" -R "${REPO_SLUG}" < "${valf}"
+              else
+                gh secret set "${key}" -R "${REPO_SLUG}" --env "${envscope}" < "${valf}"
+              fi
+              dest="secret"
+            else
+              if [[ "${level}" == "repo" ]]; then
+                gh variable set "${key}" -R "${REPO_SLUG}" < "${valf}"
+              else
+                gh variable set "${key}" -R "${REPO_SLUG}" --env "${envscope}" < "${valf}"
+              fi
+              dest="variable"
+            fi
+
+            # Append to report (no values)
+            echo "${it}" | jq -c --arg dest "${dest}" --arg level "${level}" '
+              . + {mapped_to:$dest, destination_level:$level}
+            ' >> "${REPORT}"
+            sleep 0.2
+          done
+
+          # Finalize report
+          jq -s '.' "${REPORT}" > vars-report.json
+          printf "Migrated %s variable(s) to %s\n" \
+            "$(jq 'length' vars-report.json)" "${REPO_SLUG}"
+
+      - name: Upload migration report (no values)
+        if: steps.vars.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vars-migration-${{ steps.repo.outputs.gh_repo }}
+          path: vars-report.json
+          compression-level: 6
