@@ -1,48 +1,46 @@
 
-name: "GitLab → GitHub: Containers & npm Packages (group-wide)"
+name: "GitLab → GHCR (group-wide container mirror)"
 
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry-run (containers): print actions, do not copy"
-        default: "false"
-      migrate_npm:
-        description: "Re-publish GitLab npm packages to GitHub Packages"
-        default: "false"
+        description: "Print planned copies, don't mirror (true|false)"
+        required: false
+        default: "true"
+      only_project:
+        description: "Optional: run ONLY for this GitLab project path (e.g., mygroup/app)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
-  packages: write
+  packages: write  # GHCR requires this for GITHUB_TOKEN pushes
 
 env:
-  # ---- Common naming knobs ----
-  REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}
-  GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
-  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR || '-' }}
+  # ---- REQUIRED ORG/ENDPOINTS ----
+  GL_URL:   ${{ vars.GL_URL }}         # e.g., https://gitlab.com
+  GL_GROUP: ${{ vars.GL_GROUP }}       # e.g., myorg/platform
+  GH_OWNER: ${{ vars.GH_OWNER }}       # e.g., mygithuborg
 
-  # ---- Container naming knobs ----
-  CR_NAME_MODE:         ${{ vars.CR_NAME_MODE || 'path' }}
-  GHCR_IMAGE_PREFIX:    ${{ vars.GHCR_IMAGE_PREFIX }}
+  # ---- NAMING MODES ----
+  CR_NAME_MODE:         ${{ vars.CR_NAME_MODE || 'path' }}   # 'path' or 'fullpath'
+  GHCR_IMAGE_PREFIX:    ${{ vars.GHCR_IMAGE_PREFIX }}        # optional, e.g., 'gl-'
   GHCR_IMAGE_SEPARATOR: ${{ vars.GHCR_IMAGE_SEPARATOR || '-' }}
 
-  # ---- Endpoints / owners ----
-  GL_URL:   ${{ vars.GL_URL }}
-  GL_GROUP: ${{ vars.GL_GROUP }}
-  GH_OWNER: ${{ vars.GH_OWNER }}
-
-  # ---- Filters for containers ----
+  # ---- FILTERS ----
   CR_REPO_INCLUDE_REGEX: ${{ vars.CR_REPO_INCLUDE_REGEX || '.*' }}
   CR_REPO_EXCLUDE_REGEX: ${{ vars.CR_REPO_EXCLUDE_REGEX || '^$' }}
   CR_TAG_INCLUDE_REGEX:  ${{ vars.CR_TAG_INCLUDE_REGEX  || '.*' }}
   CR_TAG_EXCLUDE_REGEX:  ${{ vars.CR_TAG_EXCLUDE_REGEX  || '^$' }}
 
 jobs:
+  # 1) Discover group projects (unless only_project is provided)
   discover_projects:
     name: "1) Discover GitLab projects (incl. subgroups)"
     runs-on: ubuntu-latest
     outputs:
-      project_list: ${{ steps.collect.outputs.project_list }}
+      project_list: ${{ steps.out.outputs.project_list }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
     steps:
@@ -51,32 +49,69 @@ jobs:
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y jq curl
-      - name: Collect projects
-        id: collect
-        shell: bash
+
+      - name: Emit single-project matrix when provided
+        id: single
         run: |
           set -euo pipefail
-          : "${GL_URL:?}"; : "${GL_GROUP:?}"
+          if [[ -n "${{ github.event.inputs.only_project }}" ]]; then
+            pj="${{ github.event.inputs.only_project }}"
+            echo "project_list=[\"${pj}\"]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+      - name: Discover projects under group (paginate; no empty items)
+        if: steps.single.outputs.project_list == ''
+        id: discover
+        env:
+          GL_API: ${{ env.GL_URL }} # placeholder
+        run: |
+          set -euo pipefail
+          : "${GL_URL:?Set GL_URL in repo/org variables}"
+          : "${GL_GROUP:?Set GL_GROUP in repo/org variables}"
+          : "${GL_TOKEN:?Add GitLab PAT as secret GITLAB_TOKEN}"
+
           GL_API="${GL_URL%/}/api/v4"
           GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')
-          page=1; ary=()
-          while true; do
+
+          tmp=$(mktemp); : > "$tmp"
+          page=1
+          while : ; do
             RESP=$(mktemp); HDR=$(mktemp)
-            curl -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" > "$RESP"
-            jq -r '.[].path_with_namespace' "$RESP" | while read -r p; do
-              # skip deletion-scheduled patterns if you use them
-              [[ "$p" == deletion_scheduled-* || "$p" == *deletion_scheduled-* ]] && continue
-              ary+=("$p")
-            done
+            curl -fsSL -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" > "$RESP" || {
+              echo "::error::Failed to list projects for ${GL_GROUP}"; exit 1; }
+
+            typ=$(jq -r 'type' "$RESP" 2>/dev/null || echo "unknown")
+            [[ "$typ" != "array" ]] && { echo "::error::Unexpected response type=$typ"; head -n 20 "$RESP"; exit 1; }
+
+            # Exclude deletion-scheduled names if you use such a convention
+            jq -r '.[].path_with_namespace' "$RESP" |
+              grep -vE '^(deletion_scheduled-|.*deletion_scheduled-.*)$' || true >> "$tmp"
+
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
           done
-          printf '%s\n' "${ary[@]}" | jq -R . | jq -s -c . | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
 
+          if [[ ! -s "$tmp" ]]; then
+            echo "::notice::No projects discovered under ${GL_GROUP}"
+            echo "project_list=[]" >> "$GITHUB_OUTPUT"
+          else
+            jq -R . < "$tmp" | jq -s -c . | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Output matrix
+        id: out
+        run: |
+          if [[ -n "${{ steps.single.outputs.project_list }}" ]]; then
+            echo "${{ steps.single.outputs.project_list }}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
+          else
+            echo "${{ steps.discover.outputs.project_list }}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
+
+  # 2) Mirror containers repo+tags to GHCR
   mirror_containers:
-    name: "2) Mirror Container Registry → GHCR (ALL)"
+    name: "2) Mirror GitLab Container Registry → GHCR"
     needs: discover_projects
     runs-on: ubuntu-latest
     strategy:
@@ -88,185 +123,98 @@ jobs:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       DRY_RUN:  ${{ github.event.inputs.dry_run }}
     steps:
-      - name: Install skopeo & jq
+      - name: Install skopeo & jq & curl
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y skopeo jq curl
-      - name: Enumerate repos & tags, then copy with skopeo
+
+      - name: Mirror all repos/tags for project
+        shell: bash
         env:
           GL_PROJECT: ${{ matrix.project }}
-        shell: bash
         run: |
           set -euo pipefail
+
+          # Guard: empty matrix item
+          [[ -z "${GL_PROJECT:-}" || "${GL_PROJECT}" == "null" ]] && { echo "::warning::GL_PROJECT empty – skipping"; exit 0; }
+
+          # Endpoints
           GL_API="${GL_URL%/}/api/v4"
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
 
-          # compute dest image base
-          if [[ "${CR_NAME_MODE}" == "fullpath" ]]; then
-            base="$(echo "${GL_PROJECT}" | tr '/' "${GHCR_IMAGE_SEPARATOR}")"
+          # Destination image base
+          if [[ "${CR_NAME_MODE:-path}" == "fullpath" ]]; then
+            base="$(echo "${GL_PROJECT}" | tr '/' "${GHCR_IMAGE_SEPARATOR:-'-'}")"
           else
             base="${GL_PROJECT##*/}"
           fi
-          IMG_BASE="${GHCR_IMAGE_PREFIX}${base}"
+          IMG_BASE="${GHCR_IMAGE_PREFIX:-}${base}"
 
           host="${GL_URL#*://}"
-          include_repo="${CR_REPO_INCLUDE_REGEX}"
-          exclude_repo="${CR_REPO_EXCLUDE_REGEX}"
-          include_tag="${CR_TAG_INCLUDE_REGEX}"
-          exclude_tag="${CR_TAG_EXCLUDE_REGEX}"
+          include_repo="${CR_REPO_INCLUDE_REGEX:-.*}"
+          exclude_repo="${CR_REPO_EXCLUDE_REGEX:-^$}"
+          include_tag="${CR_TAG_INCLUDE_REGEX:-.*}"
+          exclude_tag="${CR_TAG_EXCLUDE_REGEX:-^$}"
 
-          # list registry repositories with tags
+          echo "Project=${GL_PROJECT}  →  GHCR base=${IMG_BASE}"
+
           page=1
-          while true; do
+          while : ; do
             RESP=$(mktemp); HDR=$(mktemp)
-            curl -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/registry/repositories?tags=1&tags_count=true&per_page=100&page=${page}" > "$RESP"
+            # IMPORTANT: real ampersands (&), not HTML entities.
+            url="${GL_API}/projects/${GL_ENC}/registry/repositories?tags=1&tags_count=true&per_page=100&page=${page}"
+            http=$(curl -sS -w '%{http_code}' -o "$RESP" -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" "$url")
+            [[ "$http" != "200" ]] && { echo "::warning::GitLab API HTTP $http for $url"; head -n 5 "$RESP"; break; }
+
+            typ=$(jq -r 'type' "$RESP" 2>/dev/null || echo "unknown")
+            [[ "$typ" != "array" ]] && { echo "::warning::Unexpected response type=$typ"; head -n 5 "$RESP"; break; }
+
             jq -c '.[]' "$RESP" | while read -r repo; do
-              path=$(jq -r '.path' <<<"$repo")     # e.g. group/project or group/project/image
-              tags=$(jq -r '.tags[].name' <<<"$repo" 2>/dev/null || true)
-
+              path=$(jq -r '.path // empty' <<<"$repo")
               [[ -z "$path" ]] && continue
-              if ! [[ "$path" =~ $include_repo ]]; then
-                echo "::notice::Skip repo '$path' (does not match include)"; continue
-              fi
-              if [[ "$path" =~ $exclude_repo ]]; then
-                echo "::notice::Skip repo '$path' (matches exclude)"; continue
-              fi
 
-              # derive final image name
-              if [[ "${CR_NAME_MODE}" == "fullpath" ]]; then
+              # Repo filters
+              if ! [[ "$path" =~ $include_repo ]]; then echo "::notice::Skip repo '$path' (include)"; continue; fi
+              if   [[ "$path" =~ $exclude_repo ]]; then echo "::notice::Skip repo '$path' (exclude)"; continue; fi
+
+              # Compute GHCR image name
+              if [[ "${CR_NAME_MODE:-path}" == "fullpath" ]]; then
                 IMAGE_NAME="${IMG_BASE}"
               else
-                # keep subpath if present
                 sub="${path#${GL_PROJECT}}"; sub="${sub#/}"
                 if [[ -n "$sub" ]]; then
-                  IMAGE_NAME="${IMG_BASE}${GHCR_IMAGE_SEPARATOR}${sub//\//${GHCR_IMAGE_SEPARATOR}}"
+                  IMAGE_NAME="${IMG_BASE}${GHCR_IMAGE_SEPARATOR:-'-'}${sub//\//${GHCR_IMAGE_SEPARATOR:-'-'}}"
                 else
                   IMAGE_NAME="${IMG_BASE}"
                 fi
               fi
 
-              for tag in $tags; do
-                if ! [[ "$tag" =~ $include_tag ]]; then
-                  echo "::notice::Skip tag '$tag' (does not match include)"; continue
-                fi
-                if [[ "$tag" =~ $exclude_tag ]]; then
-                  echo "::notice::Skip tag '$tag' (matches exclude)"; continue
-                fi
+              # Tags (array may be empty)
+              mapfile -t tags < <(jq -r '.tags[].name' <<<"$repo" 2>/dev/null || true)
+              if [[ "${#tags[@]}" -eq 0 ]]; then
+                echo "::notice::No tags in repo '$path'"
+              fi
+
+              for tag in "${tags[@]}"; do
+                if ! [[ "$tag" =~ $include_tag ]]; then echo "::notice::Skip tag '$tag' (include)"; continue; fi
+                if   [[ "$tag" =~ $exclude_tag ]]; then echo "::notice::Skip tag '$tag' (exclude)"; continue; fi
 
                 SRC="docker://${host}/${path}:${tag}"
                 DST="docker://ghcr.io/${GH_OWNER}/${IMAGE_NAME}:${tag}"
                 echo "Mirror: ${SRC}  →  ${DST}"
+
                 [[ "${DRY_RUN}" == "true" ]] && continue
 
-                # skopeo copy: GitLab with PAT; GHCR with GITHUB_TOKEN
+                # skopeo: GitLab PAT for source; GITHUB_TOKEN for GHCR
                 skopeo copy \
                   --src-creds "oauth2:${GL_TOKEN}" \
                   --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
                   "${SRC}" "${DST}"
               done
             done
+
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
-          done
-
-  npm_manifest:
-    name: "3) Build npm package manifest (per project)"
-    if: ${{ github.event.inputs.migrate_npm == 'true' }}
-    needs: discover_projects
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-    env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-    steps:
-      - name: Install jq & curl
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl
-      - name: List npm packages & files
-        id: list
-        env:
-          GL_PROJECT: ${{ matrix.project }}
-        run: |
-          set -euo pipefail
-          GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
-          out="npm-${GL_PROJECT//\//_}.json"
-          all="[]"; page=1
-          while true; do
-            RESP=$(mktemp); HDR=$(mktemp)
-            curl -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/packages?package_type=npm&per_page=100&page=${page}" > "$RESP"
-            jq -c '.[]' "$RESP" | while read -r p; do
-              pid=$(jq -r '.id' <<<"$p")
-              files=$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-                "${GL_API}/projects/${GL_ENC}/packages/${pid}/package_files?per_page=100" || echo "[]")
-              all=$(jq -c --argjson one "$(jq -c --argjson f "${files}" '. + {files:$f}' <<<"$p")" '. + [ $one ]' <<<"$all")
-            done
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-            [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
-          done
-          echo "${all}" | jq -S . > "${out}"
-          echo "out=${out}" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: npm-manifest
-          path: ${{ steps.list.outputs.out }}
-          compression-level: 6
-
-  npm_republish:
-    name: "4) Re-publish npm to GitHub Packages"
-    if: ${{ github.event.inputs.migrate_npm == 'true' }}
-    needs: [npm_manifest]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: npm-manifest
-          path: manifest
-      - name: Setup Node + tools
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://npm.pkg.github.com/'
-      - name: Install jq & curl
-        run: sudo apt-get update -y && sudo apt-get install -y jq curl
-      - name: Publish all npm tarballs to GitHub Packages
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "//npm.pkg.github.com/:_authToken=${TOKEN}" > ~/.npmrc
-          shopt -s nullglob
-          for f in manifest/*.json; do
-            jq -c '.[]' "$f" | while read -r p; do
-              pid=$(jq -r '.id' <<<"$p")
-              files=$(jq -c '.files // []' <<<"$p")
-              # pick first .tgz
-              tid=$(jq -r '.[] | select(.file_name|endswith(".tgz")) | .id' <<<"$files" | head -n1)
-              tname=$(jq -r '.[] | select(.id=='"${tid}"') | .file_name' <<<"$files")
-              [[ -z "$tid" || -z "$tname" ]] && continue
-
-              # attempt package_files download (UI route then API route)
-              proj_enc=$(jq -rn --arg x "$(jq -r '._links.web_path' <<<"$p" | sed 's#/-.*/packages.*##')" '$x')
-              urlA="${GL_URL%/}/${proj_enc}/-/package_files/${tid}/download"
-              urlB="${GL_URL%/}/api/v4/projects/$(jq -rn --arg x "${proj_enc#/}" '$x|@uri')/packages/${pid}/package_files/${tid}/download"
-              curl -fLsS -H "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" -o "${tname}" "${urlA}" || \
-              curl -fLsS -H "PRIVATE-TOKEN: ${{ secrets.GITLAB_TOKEN }}" -o "${tname}" "${urlB}"
-
-              test -s "${tname}" || { echo "::warning::Failed to download ${tname}"; continue; }
-              npm publish "${tname}" --registry=https://npm.pkg.github.com/
-              echo "Published ${tname}"
-            done
           done
