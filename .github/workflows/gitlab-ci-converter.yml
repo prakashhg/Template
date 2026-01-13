@@ -2209,7 +2209,7 @@ jobs:
               </server>
             </servers>
           </settings>
-         SET
+          SET
 
       - name: Migrate Maven packages (deploy to repo path)
         if: contains(env.PACKAGE_TYPES, 'maven') || env.PACKAGE_TYPES == 'all'
