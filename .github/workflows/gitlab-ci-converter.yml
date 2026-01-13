@@ -1805,266 +1805,130 @@ jobs:
           printf "Migrated %s variable(s) to %s\n" \
             "$(jq 'length' vars-report.json)" "${REPO_SLUG}"
 
+  # 10) Package Migration · Container Registry (ALL projects)
+  package_migration_container_registry_all:
+    name: "10) Package Migration · Container Registry (ALL projects)"
+    if: ${{ vars.MIGRATE_CONTAINER_REGISTRY == 'true' }}
+    needs: [discover_projects]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    env:
+      GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:     ${{ secrets.GH_PAT }}
+      GL_URL:     ${{ vars.GL_URL }}
+      GH_OWNER:   ${{ vars.GH_OWNER }}
+      # Optional (recommended for self-managed GitLab):
+      GL_REGISTRY_URL: ${{ vars.GL_REGISTRY_URL }}
+      # Optional prefix to keep lineage in GHCR, e.g., "gitlab/"
+      GHCR_PREFIX: ${{ vars.GHCR_PREFIX }}
+    steps:
+      - name: Install jq, curl, skopeo
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl skopeo
 
-  
-# 10) Package Migration · 2.1 Container Registry (ALL projects)
-package_migration_container_registry_all:
-  name: "10) Package Migration · 2.1 Container Registry (ALL projects)"
-  if: ${{ vars.MIGRATE_CONTAINER_REGISTRY == 'true' }}
-  needs: [discover_projects]
-  runs-on: ubuntu-latest
-  strategy:
-    fail-fast: false
-    max-parallel: 2
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-  env:
-    GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-    GH_PAT:   ${{ secrets.GH_PAT }}
-    GL_URL:   ${{ vars.GL_URL }}
-    GH_OWNER: ${{ vars.GH_OWNER }}
-    # If unset, we try to derive a best-guess host, but it's safer to set this
-    GL_REGISTRY_URL: ${{ vars.GL_REGISTRY_URL }}
-    GHCR_PREFIX: ${{ vars.GHCR_PREFIX }}
-  steps:
-    - name: Install jq, curl, skopeo
-      run: |
-        set -euo pipefail
-        sudo apt-get update -y
-        sudo apt-get install -y jq curl skopeo
+      - name: Prepare GitLab API & encodings
+        id: prep
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
+          echo "gl_api=${GL_API}" >> "$GITHUB_OUTPUT"
+          echo "gl_enc=${GL_ENC}" >> "$GITHUB_OUTPUT"
 
-    - name: Prepare API & encodings
-      id: prep
-      env:
-        GL_PROJECT: ${{ matrix.project }}
-      run: |
-        set -euo pipefail
-        GL_API="${GL_URL%/}/api/v4"
-        GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
-        echo "gl_api=${GL_API}"    >> "$GITHUB_OUTPUT"
-        echo "gl_enc=${GL_ENC}"    >> "$GITHUB_OUTPUT"
-
-    - name: Resolve registry hosts
-      id: host
-      run: |
-        set -euo pipefail
-        if [[ -n "${GL_REGISTRY_URL:-}" ]]; then
-          SRC_REG="${GL_REGISTRY_URL%/}"
-        else
-          # Best-effort guess: registry.<gitlab-host>
-          host="${GL_URL#*://}"; host="${host%%/*}"
-          SRC_REG="registry.${host}"
-        fi
-        DEST_REG="ghcr.io"
-        echo "src=${SRC_REG}"  >> "$GITHUB_OUTPUT"
-        echo "dst=${DEST_REG}" >> "$GITHUB_OUTPUT"
-        echo "Using source registry: $SRC_REG; destination: $DEST_REG"
-
-    - name: Enumerate container repositories under project
-      id: repos
-      run: |
-        set -euo pipefail
-        page=1
-        out="[]"
-        while true; do
-          RESP=$(mktemp); HDR=$(mktemp)
-          if ! curl --fail-with-body -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-               "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/registry/repositories?per_page=100&page=${page}" > "$RESP"; then
-            echo "::notice::No container repositories or no access for ${{ matrix.project }}"; break
+      - name: Resolve registry hosts
+        id: host
+        run: |
+          set -euo pipefail
+          if [[ -n "${GL_REGISTRY_URL:-}" ]]; then
+            SRC_REG="${GL_REGISTRY_URL%/}"
+          else
+            # best-effort guess: registry.<gitlab-host>
+            host="${GL_URL#*://}"; host="${host%%/*}"
+            SRC_REG="registry.${host}"
           fi
-          typ=$(jq -r 'type' "$RESP" 2>/dev/null || echo "null")
-          [[ "$typ" == "array" ]] || break
-          out=$(jq -c --argjson a "$out" --argjson b "$(cat "$RESP")" '$a + $b' <<<"")
-          next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-          [[ -z "${next:-}" || "$next" == "0" ]] && break
-          page="$next"
-        done
-        echo "list=${out}" >> "$GITHUB_OUTPUT"
+          DEST_REG="ghcr.io"
+          echo "src=${SRC_REG}"  >> "$GITHUB_OUTPUT"
+          echo "dst=${DEST_REG}" >> "$GITHUB_OUTPUT"
+          echo "Using source registry: $SRC_REG; destination: $DEST_REG"
 
-    - name: Copy all tags (repo-by-repo) → GHCR (non-destructive)
-      if: ${{ steps.repos.outputs.list != '' && steps.repos.outputs.list != '[]' }}
-      env:
-        SRC_REG: ${{ steps.host.outputs.src }}
-        DST_REG: ${{ steps.host.outputs.dst }}
-      run: |
-        set -euo pipefail
-        repos='${{ steps.repos.outputs.list }}'
-        count=$(jq 'length' <<<"$repos")
-        echo "Found $count container repository(ies) under ${{ matrix.project }}"
-        # Login (source: GitLab uses oauth2:token for private registries; destination: GHCR)
-        echo "${GH_PAT}" | skopeo login --username "${{ vars.GH_OWNER }}" --password-stdin "$DST_REG"
-        # For GitLab Container Registry, 'oauth2' user with PAT works on SaaS; self-managed often supports PAT as password.
-        skopeo login --username "${GL_CR_USER:-oauth2}" --password "${GL_CR_PASSWORD:-$GL_TOKEN}" "$SRC_REG" >/dev/null 2>&1 || true
-
-        # Iterate repositories
-        idx=0
-        while (( idx < count )); do
-          rid=$(jq -r ".[$idx].id"    <<<"$repos")
-          path=$(jq -r ".[$idx].path"  <<<"$repos")   # e.g. group/project/image
-          # Destination path: optional prefix + original path (preserve structure)
-          dpath="${GHCR_PREFIX:-}${path}"
-
-          # Page through tags
-          tpage=1
+      - name: Enumerate container repositories under project
+        id: repos
+        run: |
+          set -euo pipefail
+          page=1
+          out="[]"
           while true; do
-            TRESP=$(mktemp); THDR=$(mktemp)
-            if ! curl --fail-with-body -s -D "$THDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-                 "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/registry/repositories/${rid}/tags?per_page=100&page=${tpage}" > "$TRESP"; then
-              echo "::notice::No tags for $path"; break
+            RESP=$(mktemp); HDR=$(mktemp)
+            if ! curl --fail-with-body -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                 "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/registry/repositories?per_page=100&page=${page}" > "$RESP"; then
+              echo "::notice::No container repositories or no access for ${{ matrix.project }}"
+              break
             fi
-            [[ "$(jq -r 'type' "$TRESP")" == "array" ]] || break
-            # Copy each tag
-            while read -r tag; do
-              src="docker://${SRC_REG}/${path}:${tag}"
-              dst="docker://${DST_REG}/${GH_OWNER}/${dpath}:${tag}"
-              echo "→ Copy $src  →  $dst"
-              skopeo copy --retry-times 3 --src-tls-verify=false --dest-tls-verify=true \
-                --src-creds "${GL_CR_USER:-oauth2}:${GL_CR_PASSWORD:-$GL_TOKEN}" \
-                --dest-creds "${GH_OWNER}:${GH_PAT}" \
-                "$src" "$dst"
-              # A short backoff to avoid registry throttling
-              sleep 1
-            done < <(jq -r '.[].name' "$TRESP")
-
-            tnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$THDR" | tr -d '\r')
-            [[ -z "${tnext:-}" || "$tnext" == "0" ]] && break
-            tpage="$tnext"
+            typ=$(jq -r 'type' "$RESP" 2>/dev/null || echo "null")
+            [[ "$typ" == "array" ]] || break
+            out=$(jq -c --argjson A "$out" --argjson B "$(cat "$RESP")" '$A + $B' <<<"")
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+            [[ -z "${next:-}" || "$next" == "0" ]] && break
+            page="$next"
           done
+          echo "list=${out}" >> "$GITHUB_OUTPUT"
 
-          idx=$((idx+1))
-        done
+      - name: Copy all tags (repo-by-repo) → GHCR (non-destructive)
+        if: ${{ steps.repos.outputs.list != '' && steps.repos.outputs.list != '[]' }}
+        env:
+          SRC_REG: ${{ steps.host.outputs.src }}
+          DST_REG: ${{ steps.host.outputs.dst }}
+        run: |
+          set -euo pipefail
+          repos='${{ steps.repos.outputs.list }}'
+          count=$(jq 'length' <<<"$repos")
+          echo "Found $count container repository(ies) under ${{ matrix.project }}"
 
-# 11) Package Migration · 2.2 Generic Package Registry → GHCR OCI (ALL projects)
-package_migration_generic_registry_all:
-  name: "11) Package Migration · 2.2 GitLab Generic → GHCR OCI (ALL projects)"
-  if: ${{ vars.MIGRATE_PACKAGES_GENERIC == 'true' }}
-  needs: [discover_projects]
-  runs-on: ubuntu-latest
-  strategy:
-    fail-fast: false
-    max-parallel: 2
-    matrix:
-      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-  env:
-    GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-    GH_PAT:   ${{ secrets.GH_PAT }}
-    GL_URL:   ${{ vars.GL_URL }}
-    GH_OWNER: ${{ vars.GH_OWNER }}
-    GHCR_PREFIX: ${{ vars.GHCR_PREFIX }}
-  steps:
-    - name: Install jq, curl, oras
-      run: |
-        set -euo pipefail
-        sudo apt-get update -y
-        sudo apt-get install -y jq curl
-        # Install ORAS (for OCI artifact push to GHCR)
-        ORAS_VERSION="1.2.0"
-        curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
-          | sudo tar -xz -C /usr/local/bin oras
-        oras version
-        echo "${GH_PAT}" | oras login ghcr.io -u "${GH_OWNER}" --password-stdin
+          # Login to GHCR (dest)
+          echo "${GH_PAT}" | skopeo login --username "${GH_OWNER}" --password-stdin "$DST_REG"
+          # Login to GitLab Container Registry (source). SaaS often supports oauth2+PAT.
+          skopeo login --username "${GL_CR_USER:-oauth2}" --password "${GL_CR_PASSWORD:-$GL_TOKEN}" "$SRC_REG" >/dev/null 2>&1 || true
 
-    - name: Prepare API & encodings
-      id: prep
-      env:
-        GL_PROJECT: ${{ matrix.project }}
-      run: |
-        set -euo pipefail
-        GL_API="${GL_URL%/}/api/v4"
-        GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
-        echo "gl_api=${GL_API}"    >> "$GITHUB_OUTPUT"
-        echo "gl_enc=${GL_ENC}"    >> "$GITHUB_OUTPUT"
+          # Iterate repositories
+          idx=0
+          while (( idx < count )); do
+            rid=$(jq -r ".[$idx].id"    <<<"$repos")
+            path=$(jq -r ".[$idx].path"  <<<"$repos")   # e.g., group/project/image
+            dpath="${GHCR_PREFIX:-}${path}"             # preserve structure in GHCR
 
-    - name: Enumerate GitLab packages (all types; we'll migrate GENERIC safely)
-      id: pkgs
-      run: |
-        set -euo pipefail
-        page=1
-        all="[]"
-        while true; do
-          RESP=$(mktemp); HDR=$(mktemp)
-          if ! curl --fail-with-body -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-               "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/packages?per_page=100&page=${page}" > "$RESP"; then
-            echo "::notice::No packages or no access for ${{ matrix.project }}"
-            break
-          fi
-          [[ "$(jq -r 'type' "$RESP")" == "array" ]] || break
-          all=$(jq -c --argjson A "$all" --argjson B "$(cat "$RESP")" '$A + $B' <<<"")
-          next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-          [[ -z "${next:-}" || "$next" == "0" ]] && break
-          page="$next"
-        done
-        echo "list=${all}" >> "$GITHUB_OUTPUT"
+            # Page through tags
+            tpage=1
+            while true; do
+              TRESP=$(mktemp); THDR=$(mktemp)
+              if ! curl --fail-with-body -s -D "$THDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                   "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/registry/repositories/${rid}/tags?per_page=100&page=${tpage}" > "$TRESP"; then
+                echo "::notice::No tags for $path"; break
+              fi
+              [[ "$(jq -r 'type' "$TRESP")" == "array" ]] || break
 
-    - name: Migrate GENERIC packages → GHCR as OCI artifacts (preserve name/version/file)
-      if: ${{ steps.pkgs.outputs.list != '' && steps.pkgs.outputs.list != '[]' }}
-      run: |
-        set -euo pipefail
-        pkgs='${{ steps.pkgs.outputs.list }}'
-        total=$(jq 'length' <<<"$pkgs")
-        echo "Discovered $total package(s) under ${{ matrix.project }}"
-        moved=0; skipped=0
+              while read -r tag; do
+                src="docker://${SRC_REG}/${path}:${tag}"
+                dst="docker://${DST_REG}/${GH_OWNER}/${dpath}:${tag}"
+                echo "→ Copy $src  →  $dst"
+                skopeo copy --retry-times 3 --src-tls-verify=false --dest-tls-verify=true \
+                  --src-creds "${GL_CR_USER:-oauth2}:${GL_CR_PASSWORD:-$GL_TOKEN}" \
+                  --dest-creds "${GH_OWNER}:${GH_PAT}" \
+                  "$src" "$dst"
+                sleep 1
+              done < <(jq -r '.[].name' "$TRESP")
 
-        for i in $(seq 0 $((total-1))); do
-          p=$(jq -c ".[$i]" <<<"$pkgs")
-          ptype=$(jq -r '.package_type' <<<"$p")
-          pname=$(jq -r '.name'         <<<"$p")
-          pver=$(jq -r '.version // "0"' <<<"$p")
-          pid=$(jq -r '.id'             <<<"$p")
+              tnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$THDR" | tr -d '\r')
+              [[ -z "${tnext:-}" || "$tnext" == "0" ]] && break
+              tpage="$tnext"
+            done
 
-          if [[ "$ptype" != "generic" ]]; then
-            echo "::notice::Skip non-generic package: type=$ptype name=$pname version=$pver"
-            ((skipped++))
-            continue
-          fi
-
-          # List files belonging to this generic package
-          FRESP=$(mktemp)
-          if ! curl --fail-with-body -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-               "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/packages/${pid}/package_files?per_page=100" > "$FRESP"; then
-            echo "::warning::Could not list files for package id=$pid ($pname@$pver)"; continue
-          fi
-
-          files=$(jq -r '.[]?.file_name' "$FRESP")
-          if [[ -z "$files" ]]; then
-            echo "::notice::No files for $pname@$pver"; continue
-          fi
-
-          # Download each file and push as an OCI artifact to GHCR
-          work="pkgwork"
-          rm -rf "$work"; mkdir -p "$work"
-          while read -r fname; do
-            [[ -n "$fname" ]] || continue
-            enc_pname="$(jq -rn --arg x "$pname" '$x|@uri')"
-            enc_pver="$(jq -rn --arg x "$pver"  '$x|@uri')"
-            enc_fname="$(jq -rn --arg x "$fname" '$x|@uri')"
-            url="${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/packages/generic/${enc_pname}/${enc_pver}/${enc_fname}/download"
-
-            echo "Downloading $pname/$pver → $fname"
-            curl --fail -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L "$url" -o "${work}/${fname}"
-            test -s "${work}/${fname}"
-          done <<<"$files"
-
-          # Push as OCI artifact:
-          #   ghcr.io/<owner>/<optional-prefix><project-path>/<package-name>:<version>
-          # We also attach original filenames as layers with annotations.
-          ref="ghcr.io/${GH_OWNER}/${GHCR_PREFIX:-}${{ matrix.project }}/${pname}:${pver}"
-          # Normalize path for GHCR (replace any spaces)
-          ref="$(echo "$ref" | tr ' ' '-')"
-
-          echo "Pushing OCI artifact → $ref"
-          # Build ORAS args: one layer per file, annotate filename and source
-          args=()
-          for f in "${work}"/*; do
-            b="$(basename "$f")"
-            args+=("$f:application/octet-stream:org.opencontainers.image.title=$b")
+            idx=$((idx+1))
           done
-          oras push "$ref" \
-            --annotation "org.opencontainers.image.source=${{ vars.GL_URL }}/${{ matrix.project }}" \
-            --annotation "org.opencontainers.image.description=Imported from GitLab Generic Package Registry" \
-            "${args[@]}"
-
-          ((moved++))
-        done
-
-        echo "Moved $moved generic package(s); skipped $skipped (non-generic or empty)."
