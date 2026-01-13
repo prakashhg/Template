@@ -15,7 +15,7 @@ on:
 
 permissions:
   contents: write
-  packages: write  # GHCR needs this for GITHUB_TOKEN pushes
+  packages: write  # required so GITHUB_TOKEN can push to GHCR
 
 env:
   # ---- REQUIRED ORG/ENDPOINTS ----
@@ -35,12 +35,26 @@ env:
   CR_TAG_EXCLUDE_REGEX:  ${{ vars.CR_TAG_EXCLUDE_REGEX  || '^$' }}
 
 jobs:
-  # 1) Discover group projects (unless only_project is provided)
+  check_setup:
+    name: "0) Validate setup"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify variables/secrets
+        run: |
+          set -euo pipefail
+          [[ -n "${GL_URL:-}"   ]] || { echo "::error::Missing vars.GL_URL"; exit 1; }
+          [[ -n "${GL_GROUP:-}" ]] || { echo "::error::Missing vars.GL_GROUP"; exit 1; }
+          [[ -n "${GH_OWNER:-}" ]] || { echo "::error::Missing vars.GH_OWNER"; exit 1; }
+          [[ -n "${{ secrets.GITLAB_TOKEN }}" ]] || { echo "::error::Missing secret GITLAB_TOKEN"; exit 1; }
+          echo "Setup OK: GL_URL=${GL_URL}, GL_GROUP=${GL_GROUP}, GH_OWNER=${GH_OWNER}"
+
   discover_projects:
     name: "1) Discover GitLab projects (incl. subgroups)"
     runs-on: ubuntu-latest
+    needs: check_setup
     outputs:
-      project_list: ${{ steps.out.outputs.project_list }}
+      project_list:  ${{ steps.out.outputs.project_list }}
+      project_count: ${{ steps.out.outputs.project_count }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
     steps:
@@ -50,25 +64,22 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      - name: Emit single-project matrix when provided
+      - name: Single-project override (if input provided)
         id: single
         run: |
           set -euo pipefail
           pj="${{ github.event.inputs.only_project }}"
           if [[ -n "${pj}" ]]; then
             arr=$(jq -c -n --arg pj "${pj}" '[ $pj ]')
-            echo "project_list=${arr}" >> "$GITHUB_OUTPUT"
+            echo "project_list=${arr}"  >> "$GITHUB_OUTPUT"
+            echo "project_count=1"      >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Discover projects under group (paginate; no empty items)
+      - name: Discover group projects (paginate; robust)
         if: steps.single.outputs.project_list == ''
         id: discover
         run: |
           set -euo pipefail
-          : "${GL_URL:?Set GL_URL in repo/org variables}"
-          : "${GL_GROUP:?Set GL_GROUP in repo/org variables}"
-          : "${GL_TOKEN:?Add GitLab PAT as secret GITLAB_TOKEN}"
-
           GL_API="${GL_URL%/}/api/v4"
           GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')
 
@@ -92,11 +103,14 @@ jobs:
             page="$next"
           done
 
-          if [[ ! -s "$tmp" ]]; then
+          cnt=$(wc -l < "$tmp" | tr -d '[:space:]')
+          if [[ "${cnt}" == "0" ]]; then
             echo "::notice::No projects discovered under ${GL_GROUP}"
             echo "project_list=[]" >> "$GITHUB_OUTPUT"
+            echo "project_count=0" >> "$GITHUB_OUTPUT"
           else
             jq -R . < "$tmp" | jq -s -c . | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
+            echo "project_count=${cnt}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Output matrix (safe)
@@ -107,14 +121,15 @@ jobs:
           disc='${{ steps.discover.outputs.project_list }}'
           if [[ -n "${single}" ]]; then
             echo "${single}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
+            echo "project_count=${{ steps.single.outputs.project_count }}" >> "$GITHUB_OUTPUT"
           else
             echo "${disc}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
-          fi
+            echo "project_count=${{ steps.discover.outputs.project_count }}" >> "$GITHUB_OUTPUT"
 
-  # 2) Mirror containers repo+tags to GHCR
   mirror_containers:
     name: "2) Mirror GitLab Container Registry → GHCR"
     needs: discover_projects
+    if: ${{ needs.discover_projects.outputs.project_count != '0' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -137,11 +152,8 @@ jobs:
           GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
-
-          # Guard: empty matrix item
           [[ -z "${GL_PROJECT:-}" || "${GL_PROJECT}" == "null" ]] && { echo "::warning::GL_PROJECT empty – skipping"; exit 0; }
 
-          # Endpoints
           GL_API="${GL_URL%/}/api/v4"
           GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
 
@@ -164,7 +176,6 @@ jobs:
           page=1
           while : ; do
             RESP=$(mktemp); HDR=$(mktemp)
-            # IMPORTANT: real '&' characters (no HTML entities)
             url="${GL_API}/projects/${GL_ENC}/registry/repositories?tags=1&tags_count=true&per_page=100&page=${page}"
             http=$(curl -sS -w '%{http_code}' -o "$RESP" -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" "$url")
             [[ "$http" != "200" ]] && { echo "::warning::GitLab API HTTP $http for $url"; head -n 5 "$RESP"; break; }
@@ -208,7 +219,6 @@ jobs:
 
                 [[ "${DRY_RUN}" == "true" ]] && continue
 
-                # skopeo: GitLab PAT for source; GITHUB_TOKEN for GHCR
                 skopeo copy \
                   --src-creds "oauth2:${GL_TOKEN}" \
                   --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
@@ -220,3 +230,11 @@ jobs:
             [[ -z "$next" || "$next" == "0" ]] && break
             page="$next"
           done
+
+  nothing_to_do:
+    name: "ℹ️ No projects found — skipping mirror"
+    needs: discover_projects
+    if: ${{ needs.discover_projects.outputs.project_count == '0' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "::notice::No projects discovered under '${GL_GROUP}'. Nothing to mirror."
