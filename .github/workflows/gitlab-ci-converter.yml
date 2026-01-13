@@ -1734,105 +1734,7 @@ jobs:
           COUNT="$(jq 'length' "${COMB}")"
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
           echo "list=$(jq -c '.' "${COMB}")" >> "$GITHUB_OUTPUT"
-
-      - name: Upsert to GitHub (repo/env secrets & variables); create environments as needed
-        if: steps.vars.outputs.count != '0'
-        env:
-          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
-        run: |
-          set -euo pipefail
-          REPO_SLUG="${GH_OWNER}/${GH_REPO}"
-          LIST_JSON='${{ steps.vars.outputs.list }}'
-          REPORT="$(mktemp)"
-
-          echo '[]' > "${REPORT}"
-          mapfile -t items < <(jq -c '.[]' <<< "${LIST_JSON}")
-          for it in "${items[@]}"; do
-            key=$(jq -r '.key' <<< "${it}")
-            envscope=$(jq -r '.environment_scope // "*"' <<< "${it}")
-            vtype=$(jq -r '.variable_type // "env_var"' <<< "${it}")
-            masked=$(jq -r '.masked // false' <<< "${it}")
-            hidden=$(jq -r '.hidden // false' <<< "${it}")
-
-            # Decide destination: secret vs variable
-            is_secret="false"
-            if [[ "${masked}" == "true" || "${hidden}" == "true" || "${vtype}" == "file" ]]; then
-              is_secret="true"
-            fi
-
-            # value via temp file to keep logs clean
-            valf="$(mktemp)"
-            jq -r '.value' <<< "${it}" > "${valf}"
-
-            # ensure environment (if scoped)
-            level="repo"
-            if [[ "${envscope}" != "*" ]]; then
-              level="environment:${envscope}"
-              # Minimal PUT: do NOT send wait_timer or protection rules on plans that don't support them
-              gh api \
-                --method PUT \
-                -H "Accept: application/vnd.github+json" \
-                "repos/${REPO_SLUG}/environments/${envscope}" \
-                >/dev/null
-            fi
-
-            # Upsert
-            if [[ "${is_secret}" == "true" ]]; then
-              if [[ "${level}" == "repo" ]]; then
-                gh secret set "${key}" -R "${REPO_SLUG}" < "${valf}"
-              else
-                gh secret set "${key}" -R "${REPO_SLUG}" --env "${envscope}" < "${valf}"
-              fi
-              dest="secret"
-            else
-              if [[ "${level}" == "repo" ]]; then
-                gh variable set "${key}" -R "${REPO_SLUG}" < "${valf}"
-              else
-                gh variable set "${key}" -R "${REPO_SLUG}" --env "${envscope}" < "${valf}"
-              fi
-              dest="variable"
-            fi
-
-            # Append to report (no values)
-            echo "${it}" | jq -c --arg dest "${dest}" --arg level "${level}" '
-              . + {mapped_to:$dest, destination_level:$level}
-            ' >> "${REPORT}"
-            sleep 0.2
-          done
-
-          # Finalize report
-          jq -s '.' "${REPORT}" > vars-report.json
-          printf "Migrated %s variable(s) to %s\n" \
-            "$(jq 'length' vars-report.json)" "${REPO_SLUG}"
-
-  # 10) Package Migration · Container Registry (ALL projects)
-  package_migration_container_registry_all:
-    name: "10) Package Migration · Container Registry (ALL projects)"
-    if: ${{ vars.MIGRATE_CONTAINER_REGISTRY == 'true' }}
-    needs: [discover_projects]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-    env:
-      GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:     ${{ secrets.GH_PAT }}
-      GL_URL:     ${{ vars.GL_URL }}
-      GH_OWNER:   ${{ vars.GH_OWNER }}
-      # Optional (recommended for self-managed GitLab):
-      GL_REGISTRY_URL: ${{ vars.GL_REGISTRY_URL }}
-      # Optional prefix to keep lineage in GHCR, e.g., "gitlab/"
-      GHCR_PREFIX: ${{ vars.GHCR_PREFIX }}
-    steps:
-      - name: Install jq, curl, skopeo
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl skopeo
-
-      - name: Prepare GitLab API & encodings
+            - name: Prepare GitLab API & encodings
         id: prep
         env:
           GL_PROJECT: ${{ matrix.project }}
@@ -1932,3 +1834,74 @@ jobs:
 
             idx=$((idx+1))
           done
+
+
+      - name: Upsert to GitHub (repo/env secrets & variables); create environments as needed
+        if: steps.vars.outputs.count != '0'
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          REPO_SLUG="${GH_OWNER}/${GH_REPO}"
+          LIST_JSON='${{ steps.vars.outputs.list }}'
+          REPORT="$(mktemp)"
+
+          echo '[]' > "${REPORT}"
+          mapfile -t items < <(jq -c '.[]' <<< "${LIST_JSON}")
+          for it in "${items[@]}"; do
+            key=$(jq -r '.key' <<< "${it}")
+            envscope=$(jq -r '.environment_scope // "*"' <<< "${it}")
+            vtype=$(jq -r '.variable_type // "env_var"' <<< "${it}")
+            masked=$(jq -r '.masked // false' <<< "${it}")
+            hidden=$(jq -r '.hidden // false' <<< "${it}")
+
+            # Decide destination: secret vs variable
+            is_secret="false"
+            if [[ "${masked}" == "true" || "${hidden}" == "true" || "${vtype}" == "file" ]]; then
+              is_secret="true"
+            fi
+
+            # value via temp file to keep logs clean
+            valf="$(mktemp)"
+            jq -r '.value' <<< "${it}" > "${valf}"
+
+            # ensure environment (if scoped)
+            level="repo"
+            if [[ "${envscope}" != "*" ]]; then
+              level="environment:${envscope}"
+              # Minimal PUT: do NOT send wait_timer or protection rules on plans that don't support them
+              gh api \
+                --method PUT \
+                -H "Accept: application/vnd.github+json" \
+                "repos/${REPO_SLUG}/environments/${envscope}" \
+                >/dev/null
+            fi
+
+            # Upsert
+            if [[ "${is_secret}" == "true" ]]; then
+              if [[ "${level}" == "repo" ]]; then
+                gh secret set "${key}" -R "${REPO_SLUG}" < "${valf}"
+              else
+                gh secret set "${key}" -R "${REPO_SLUG}" --env "${envscope}" < "${valf}"
+              fi
+              dest="secret"
+            else
+              if [[ "${level}" == "repo" ]]; then
+                gh variable set "${key}" -R "${REPO_SLUG}" < "${valf}"
+              else
+                gh variable set "${key}" -R "${REPO_SLUG}" --env "${envscope}" < "${valf}"
+              fi
+              dest="variable"
+            fi
+
+            # Append to report (no values)
+            echo "${it}" | jq -c --arg dest "${dest}" --arg level "${level}" '
+              . + {mapped_to:$dest, destination_level:$level}
+            ' >> "${REPORT}"
+            sleep 0.2
+          done
+
+          # Finalize report
+          jq -s '.' "${REPORT}" > vars-report.json
+          printf "Migrated %s variable(s) to %s\n" \
+            "$(jq 'length' vars-report.json)" "${REPO_SLUG}"
