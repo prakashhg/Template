@@ -1804,12 +1804,11 @@ jobs:
           jq -s '.' "${REPORT}" > vars-report.json
           printf "Migrated %s variable(s) to %s\n" \
             "$(jq 'length' vars-report.json)" "${REPO_SLUG}"
-
-  # 10) Package Migration · Container Registry (ALL projects) — runs after dry-run
+  
+  # 10) Package Migration · Container Registry (ALL projects) — after dry-run, with group fallback + GHCR verification
   package_migration_container_registry_all:
     name: "10) Package Migration · Container Registry (ALL projects) — after dry-run"
     needs: [discover_projects, ci_migration_dry_run_all]
-    # Run after dry-run completes (even if some matrix entries failed); skip only if explicitly disabled
     if: ${{ always() && vars.MIGRATE_CONTAINER_REGISTRY != 'false' }}
     runs-on: ubuntu-latest
     strategy:
@@ -1822,7 +1821,8 @@ jobs:
       GH_PAT:     ${{ secrets.GH_PAT }}
       GL_URL:     ${{ vars.GL_URL }}
       GH_OWNER:   ${{ vars.GH_OWNER }}
-      # Optional (recommended for self-managed GitLab): e.g., registry.gitlab.example.com
+      GL_GROUP:   ${{ vars.GL_GROUP }}
+      # Optional: e.g., registry.gitlab.com (for SaaS); for self-managed set your host
       GL_REGISTRY_URL: ${{ vars.GL_REGISTRY_URL }}
       # Optional prefix to keep lineage in GHCR, e.g., "gitlab/"
       GHCR_PREFIX: ${{ vars.GHCR_PREFIX }}
@@ -1841,8 +1841,10 @@ jobs:
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
           GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
-          echo "gl_api=${GL_API}" >> "$GITHUB_OUTPUT"
-          echo "gl_enc=${GL_ENC}" >> "$GITHUB_OUTPUT"
+          GROUP_ENC="$(jq -rn --arg x "${GL_GROUP:-}" '$x|@uri')"
+          echo "gl_api=${GL_API}"   >> "$GITHUB_OUTPUT"
+          echo "gl_enc=${GL_ENC}"   >> "$GITHUB_OUTPUT"
+          echo "grp_enc=${GROUP_ENC}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve registry hosts
         id: host
@@ -1851,7 +1853,6 @@ jobs:
           if [[ -n "${GL_REGISTRY_URL:-}" ]]; then
             SRC_REG="${GL_REGISTRY_URL%/}"
           else
-            # best-effort guess: registry.<gitlab-host>
             host="${GL_URL#*://}"; host="${host%%/*}"
             SRC_REG="registry.${host}"
           fi
@@ -1860,8 +1861,8 @@ jobs:
           echo "dst=${DEST_REG}" >> "$GITHUB_OUTPUT"
           echo "Using source registry: $SRC_REG; destination: $DEST_REG"
 
-      - name: Enumerate container repositories under project
-        id: repos
+      - name: Enumerate container repositories (project scope)
+        id: repos_project
         run: |
           set -euo pipefail
           page=1
@@ -1870,7 +1871,6 @@ jobs:
             RESP=$(mktemp); HDR=$(mktemp)
             if ! curl --fail-with-body -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
                  "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/registry/repositories?per_page=100&page=${page}" > "$RESP"; then
-              echo "::notice::No container repositories or no access for ${{ matrix.project }}"
               break
             fi
             typ=$(jq -r 'type' "$RESP" 2>/dev/null || echo "null")
@@ -1882,7 +1882,52 @@ jobs:
           done
           echo "list=${out}" >> "$GITHUB_OUTPUT"
 
-      - name: Copy all tags (repo-by-repo) → GHCR (non-destructive)
+      - name: Fallback: enumerate container repositories (group scope) and filter to this project
+        id: repos_group
+        if: ${{ steps.repos_project.outputs.list == '' || steps.repos_project.outputs.list == '[]' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ steps.prep.outputs.grp_enc }}" || "${{ steps.prep.outputs.grp_enc }}" == "null" ]]; then
+            echo "list=[]" >> "$GITHUB_OUTPUT"
+            echo "::notice::No project repos found and GL_GROUP unset; skipping group fallback."
+            exit 0
+          fi
+          page=1
+          agg="[]"
+          while true; do
+            RESP=$(mktemp); HDR=$(mktemp)
+            if ! curl --fail-with-body -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                 "${{ steps.prep.outputs.gl_api }}/groups/${{ steps.prep.outputs.grp_enc }}/registry/repositories?per_page=100&page=${page}" > "$RESP"; then
+              break
+            fi
+            [[ "$(jq -r 'type' "$RESP")" == "array" ]] || break
+            agg=$(jq -c --argjson A "$agg" --argjson B "$(cat "$RESP")" '$A + $B' <<<"")
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+            [[ -z "${next:-}" || "$next" == "0" ]] && break
+            page="$next"
+          done
+          # Filter to repositories whose 'path' starts with the project path
+          filtered=$(jq -c --arg p "${{ matrix.project }}" '
+            [ .[] | select( (.path|tostring) | startswith($p) ) ]
+          ' <<<"$agg")
+          echo "list=${filtered}" >> "$GITHUB_OUTPUT"
+          if [[ "$filtered" == "[]" ]]; then
+            echo "::notice::${{ matrix.project }}: Container Registry is empty at project & group levels; nothing to migrate. Push an image once and re-run."
+          fi
+
+      - name: Combine repo lists
+        id: repos
+        run: |
+          set -euo pipefail
+          pj='${{ steps.repos_project.outputs.list }}'
+          gp='${{ steps.repos_group.outputs.list }}'
+          if [[ -n "$pj" && "$pj" != "[]" ]]; then
+            echo "list=${pj}" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=${gp:-[]}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Copy all tags → GHCR (non-destructive)
         if: ${{ steps.repos.outputs.list != '' && steps.repos.outputs.list != '[]' }}
         env:
           SRC_REG: ${{ steps.host.outputs.src }}
@@ -1895,18 +1940,18 @@ jobs:
 
           # Login to GHCR (dest)
           echo "${GH_PAT}" | skopeo login --username "${GH_OWNER}" --password-stdin "$DST_REG"
-          # Login to GitLab Container Registry (source). SaaS often supports oauth2+PAT.
+          # Login to GitLab Container Registry (source)
           skopeo login --username "${GL_CR_USER:-oauth2}" --password "${GL_CR_PASSWORD:-$GL_TOKEN}" "$SRC_REG" >/dev/null 2>&1 || true
 
-          # Iterate repositories
           idx=0
           while (( idx < count )); do
-            rid=$(jq -r ".[$idx].id"   <<<"$repos")
-            path=$(jq -r ".[$idx].path"<<<"$repos")   # e.g., group/project/image
-            dpath="${GHCR_PREFIX:-}${path}"           # preserve structure in GHCR
+            rid=$(jq -r ".[$idx].id"    <<<"$repos")
+            path=$(jq -r ".[$idx].path"  <<<"$repos")   # e.g., group/project[/image]
+            # Normalize to lowercase for GHCR safety
+            dpath="$(echo "${GHCR_PREFIX:-}${path}" | tr 'A-Z' 'a-z')"
 
-            # Page through tags
             tpage=1
+            pushed_any=0
             while true; do
               TRESP=$(mktemp); THDR=$(mktemp)
               if ! curl --fail-with-body -s -D "$THDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
@@ -1914,7 +1959,6 @@ jobs:
                 echo "::notice::No tags for $path"; break
               fi
               [[ "$(jq -r 'type' "$TRESP")" == "array" ]] || break
-
               while read -r tag; do
                 src="docker://${SRC_REG}/${path}:${tag}"
                 dst="docker://${DST_REG}/${GH_OWNER}/${dpath}:${tag}"
@@ -1923,6 +1967,7 @@ jobs:
                   --src-creds "${GL_CR_USER:-oauth2}:${GL_CR_PASSWORD:-$GL_TOKEN}" \
                   --dest-creds "${GH_OWNER}:${GH_PAT}" \
                   "$src" "$dst"
+                pushed_any=1
                 sleep 1
               done < <(jq -r '.[].name' "$TRESP")
 
@@ -1930,6 +1975,24 @@ jobs:
               [[ -z "${tnext:-}" || "$tnext" == "0" ]] && break
               tpage="$tnext"
             done
+
+            # Verify presence in GHCR (org packages) and log URL
+            if (( pushed_any == 1 )); then
+              # Query GitHub Packages (container type) for this org
+              PKGS=$(curl -s -H "Accept: application/vnd.github+json" \
+                           -H "Authorization: Bearer ${GH_PAT}" \
+                           -H "X-GitHub-Api-Version: 2022-11-28" \
+                           "https://api.github.com/orgs/${GH_OWNER}/packages?package_type=container")
+              # Find a package whose name matches our dpath tail (exact match or ends-with)
+              name_match=$(jq -r --arg dp "$dpath" '
+                .[] | select(.package_type=="container") | .name
+              ' <<<"$PKGS" | grep -E "^$(basename "$dpath")$|$" || true)
+              if [[ -n "$name_match" ]]; then
+                echo "::notice::GHCR package detected: https://github.com/orgs/${GH_OWNER}/packages/container/${name_match}"
+              else
+                echo "::warning::Package not listed yet under org packages; use GHCR API to inspect or check visibility."
+              fi
+            fi
 
             idx=$((idx+1))
           done
