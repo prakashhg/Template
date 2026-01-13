@@ -1,60 +1,42 @@
 
-name: "GitLab → GHCR (group-wide container mirror)"
+name: "GitLab → GitHub: Container & Package migration"
 
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Print planned copies, don't mirror (true|false)"
-        required: false
-        default: "true"
-      only_project:
-        description: "Optional: run ONLY for this GitLab project path (e.g., mygroup/app)"
-        required: false
-        default: ""
+        description: "Container mirror dry-run (don't copy images)"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
-  packages: write  # required so GITHUB_TOKEN can push to GHCR
+  contents: read
+  packages: write  # needed when pushing to GHCR with GITHUB_TOKEN
 
 env:
-  # ---- REQUIRED ORG/ENDPOINTS ----
-  GL_URL:   ${{ vars.GL_URL }}         # e.g., https://gitlab.com
-  GL_GROUP: ${{ vars.GL_GROUP }}       # e.g., myorg/platform
-  GH_OWNER: ${{ vars.GH_OWNER }}       # e.g., mygithuborg
-
-  # ---- NAMING MODES ----
-  CR_NAME_MODE:         ${{ vars.CR_NAME_MODE || 'path' }}   # 'path' or 'fullpath'
-  GHCR_IMAGE_PREFIX:    ${{ vars.GHCR_IMAGE_PREFIX }}        # optional, e.g., 'gl-'
-  GHCR_IMAGE_SEPARATOR: ${{ vars.GHCR_IMAGE_SEPARATOR || '-' }}
-
-  # ---- FILTERS ----
-  CR_REPO_INCLUDE_REGEX: ${{ vars.CR_REPO_INCLUDE_REGEX || '.*' }}
-  CR_REPO_EXCLUDE_REGEX: ${{ vars.CR_REPO_EXCLUDE_REGEX || '^$' }}
-  CR_TAG_INCLUDE_REGEX:  ${{ vars.CR_TAG_INCLUDE_REGEX  || '.*' }}
-  CR_TAG_EXCLUDE_REGEX:  ${{ vars.CR_TAG_EXCLUDE_REGEX  || '^$' }}
+  # ---- GitLab ----
+  GL_URL: ${{ vars.GL_URL }}                 # e.g. https://gitlab.com or https://gitlab.example.com
+  GL_GROUP: ${{ vars.GL_GROUP }}             # group/subgroup
+  GL_REGISTRY_HOST: ${{ vars.GL_REGISTRY_HOST }} # e.g. registry.gitlab.com or your registry host
+  # ---- Naming / structure preservation ----
+  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}     # "path" or "fullpath"
+  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}     # optional prefix for GHCR repo/image names
+  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }} # replacement for '/'
+  # ---- GH owner for GHCR path ----
+  GH_OWNER: ${{ vars.GH_OWNER }}
 
 jobs:
-  check_setup:
-    name: "0) Validate setup"
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify variables/secrets
-        run: |
-          set -euo pipefail
-          [[ -n "${GL_URL:-}"   ]] || { echo "::error::Missing vars.GL_URL"; exit 1; }
-          [[ -n "${GL_GROUP:-}" ]] || { echo "::error::Missing vars.GL_GROUP"; exit 1; }
-          [[ -n "${GH_OWNER:-}" ]] || { echo "::error::Missing vars.GH_OWNER"; exit 1; }
-          [[ -n "${{ secrets.GITLAB_TOKEN }}" ]] || { echo "::error::Missing secret GITLAB_TOKEN"; exit 1; }
-          echo "Setup OK: GL_URL=${GL_URL}, GL_GROUP=${GL_GROUP}, GH_OWNER=${GH_OWNER}"
+  # 0) Bugfix reference — adjust your CI discovery steps:
+  #    Replace the two lines below in your existing workflow steps that list .gitlab* files:
+  #      OLD: [[ "$t" == "blob" ]] && continue
+  #      NEW: [[ "$t" != "blob" ]] && continue
 
+  # 1) Discover GitLab projects under GL_GROUP (includes subgroups; excludes deletion-scheduled)
   discover_projects:
-    name: "1) Discover GitLab projects (incl. subgroups)"
+    name: "Discover GitLab projects for conversion"
     runs-on: ubuntu-latest
-    needs: check_setup
     outputs:
-      project_list:  ${{ steps.out.outputs.project_list }}
-      project_count: ${{ steps.out.outputs.project_count }}
+      project_list: ${{ steps.collect.outputs.project_list }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
     steps:
@@ -64,177 +46,225 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      - name: Single-project override (if input provided)
-        id: single
+      - name: Collect & filter projects under GL_GROUP (exclude deletion-scheduled)
+        id: collect
+        shell: bash
         run: |
           set -euo pipefail
-          pj="${{ github.event.inputs.only_project }}"
-          if [[ -n "${pj}" ]]; then
-            arr=$(jq -c -n --arg pj "${pj}" '[ $pj ]')
-            echo "project_list=${arr}"  >> "$GITHUB_OUTPUT"
-            echo "project_count=1"      >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Discover group projects (paginate; robust)
-        if: steps.single.outputs.project_list == ''
-        id: discover
-        run: |
-          set -euo pipefail
+          : "${GL_URL:?GL_URL required}"; : "${GL_GROUP:?GL_GROUP required}"
           GL_API="${GL_URL%/}/api/v4"
-          GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')
+          GROUP_ENC="$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')"
+          REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
+          GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
+          SEP="${GH_REPO_SEPARATOR:-"-"}"
 
-          tmp=$(mktemp); : > "$tmp"
           page=1
-          while : ; do
-            RESP=$(mktemp); HDR=$(mktemp)
-            curl -fsSL -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" > "$RESP" || {
-              echo "::error::Failed to list projects for ${GL_GROUP}"; exit 1; }
+          filtered=()
+          while true; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" > "${RESP}"
 
-            typ=$(jq -r 'type' "$RESP" 2>/dev/null || echo "unknown")
-            [[ "$typ" != "array" ]] && { echo "::error::Unexpected response type=$typ"; head -n 20 "$RESP"; exit 1; }
+            while read -r proj; do
+              path="$(jq -r '.path_with_namespace' <<<"${proj}")"
+              [[ -z "${path}" ]] && continue
+              if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
+                base="$(echo "${path}" | tr '/' "${SEP}")"
+              else
+                base="${path##*/}"
+              fi
+              dest="${GH_REPO_PREFIX}${base}"
+              if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
+                echo "Exclude (deletion-scheduled): ${dest} (from GL: ${path})"
+              else
+                filtered+=("${path}")
+              fi
+            done < <(jq -c '.[]' "${RESP}")
 
-            # Exclude deletion-scheduled names if you use such a convention
-            jq -r '.[].path_with_namespace' "$RESP" |
-              grep -vE '^(deletion_scheduled-|.*deletion_scheduled-.*)$' || true >> "$tmp"
-
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-            [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
+            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
+            page="${next}"
           done
 
-          cnt=$(wc -l < "$tmp" | tr -d '[:space:]')
-          if [[ "${cnt}" == "0" ]]; then
-            echo "::notice::No projects discovered under ${GL_GROUP}"
-            echo "project_list=[]" >> "$GITHUB_OUTPUT"
-            echo "project_count=0" >> "$GITHUB_OUTPUT"
-          else
-            jq -R . < "$tmp" | jq -s -c . | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
-            echo "project_count=${cnt}" >> "$GITHUB_OUTPUT"
-          fi
+          json="$(printf '%s\n' "${filtered[@]:-}" | jq -R . | jq -s -c .)"
+          echo "project_list=${json}" >> "${GITHUB_OUTPUT}"
 
-      - name: Output matrix (safe)
-        id: out
-        run: |
-          set -euo pipefail
-          single='${{ steps.single.outputs.project_list }}'
-          disc='${{ steps.discover.outputs.project_list }}'
-          if [[ -n "${single}" ]]; then
-            echo "${single}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
-            echo "project_count=${{ steps.single.outputs.project_count }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "${disc}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
-            echo "project_count=${{ steps.discover.outputs.project_count }}" >> "$GITHUB_OUTPUT"
-
-  mirror_containers:
-    name: "2) Mirror GitLab Container Registry → GHCR"
-    needs: discover_projects
-    if: ${{ needs.discover_projects.outputs.project_count != '0' }}
+  # 2) Container Registry · Mirror images GitLab → GHCR (ALL projects)
+  container_registry_mirror_all:
+    name: "Container Registry · Mirror GitLab images → GHCR (ALL projects)"
+    needs: [discover_projects]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 3
       matrix:
         project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     env:
+      # GitLab side
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      DRY_RUN:  ${{ github.event.inputs.dry_run }}
+      GL_REGISTRY_USER: ${{ secrets.GL_REGISTRY_USER }}       # user or deploy-token with read_registry
+      GL_REGISTRY_PASSWORD: ${{ secrets.GL_REGISTRY_PASSWORD }}
+      # GH side
+      GHCR_PAT: ${{ secrets.GHCR_PAT }}                       # optional PAT classic with write:packages
+      CR_DRY_RUN: ${{ github.event.inputs.dry_run }}
     steps:
-      - name: Install skopeo & jq & curl
+      - name: Install jq & skopeo
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y skopeo jq curl
+          sudo apt-get install -y jq skopeo
 
-      - name: Mirror all repos/tags for project
-        shell: bash
+      - name: Compute GHCR image namespace (preserve structure)
+        id: ns
         env:
           GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
-          [[ -z "${GL_PROJECT:-}" || "${GL_PROJECT}" == "null" ]] && { echo "::warning::GL_PROJECT empty – skipping"; exit 0; }
-
-          GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
-
-          # Destination image base
-          if [[ "${CR_NAME_MODE:-path}" == "fullpath" ]]; then
-            base="$(echo "${GL_PROJECT}" | tr '/' "${GHCR_IMAGE_SEPARATOR:-'-'}")"
+          MODE="${REPO_NAME_MODE:-path}"
+          SEP="${GH_REPO_SEPARATOR:-"-"}"
+          PREF="${GH_REPO_PREFIX:-""}"
+          if [[ "$MODE" == "fullpath" ]]; then
+            base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
           else
             base="${GL_PROJECT##*/}"
           fi
-          IMG_BASE="${GHCR_IMAGE_PREFIX:-}${base}"
+          echo "image_repo_base=${PREF}${base}" >> "$GITHUB_OUTPUT"
 
-          host="${GL_URL#*://}"
-          include_repo="${CR_REPO_INCLUDE_REGEX:-.*}"
-          exclude_repo="${CR_REPO_EXCLUDE_REGEX:-^$}"
-          include_tag="${CR_TAG_INCLUDE_REGEX:-.*}"
-          exclude_tag="${CR_TAG_EXCLUDE_REGEX:-^$}"
+      - name: Login to GHCR with GITHUB_TOKEN (repo-scoped)
+        if: ${{ env.GHCR_PAT == '' }}
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | skopeo login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
 
-          echo "Project=${GL_PROJECT}  →  GHCR base=${IMG_BASE}"
+      - name: Login to GHCR with PAT classic (org-scoped or cross-repo)
+        if: ${{ env.GHCR_PAT != '' }}
+        run: |
+          set -euo pipefail
+          echo "${GHCR_PAT}" | skopeo login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
 
+      - name: Login to GitLab Container Registry
+        run: |
+          set -euo pipefail
+          echo "${GL_REGISTRY_PASSWORD}" | skopeo login "${GL_REGISTRY_HOST}" \
+            --username "${GL_REGISTRY_USER}" --password-stdin
+
+      - name: Discover registry repositories in source
+        id: repos
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
           page=1
-          while : ; do
-            RESP=$(mktemp); HDR=$(mktemp)
-            url="${GL_API}/projects/${GL_ENC}/registry/repositories?tags=1&tags_count=true&per_page=100&page=${page}"
-            http=$(curl -sS -w '%{http_code}' -o "$RESP" -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" "$url")
-            [[ "$http" != "200" ]] && { echo "::warning::GitLab API HTTP $http for $url"; head -n 5 "$RESP"; break; }
+          repos_json="[]"
+          while true; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/registry/repositories?per_page=100&page=${page}" > "${RESP}" || true
 
-            typ=$(jq -r 'type' "$RESP" 2>/dev/null || echo "unknown")
-            [[ "$typ" != "array" ]] && { echo "::warning::Unexpected response type=$typ"; head -n 5 "$RESP"; break; }
+            if [[ "$(jq -r 'type' "${RESP}")" != "array" ]]; then
+              break
+            fi
+            repos_json="$(jq -n \
+              --argjson acc "${repos_json}" \
+              --argjson arr "$(cat "${RESP}")" \
+              '$acc + $arr')"
 
-            jq -c '.[]' "$RESP" | while read -r repo; do
-              path=$(jq -r '.path // empty' <<<"$repo")
-              [[ -z "$path" ]] && continue
+            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
+            page="${next}"
+          done
+          echo "repo_list=${repos_json}" >> "$GITHUB_OUTPUT"
+          echo "gl_enc=${GL_ENC}" >> "$GITHUB_OUTPUT"
 
-              # Repo filters
-              if ! [[ "$path" =~ $include_repo ]]; then echo "::notice::Skip repo '$path' (include)"; continue; fi
-              if   [[ "$path" =~ $exclude_repo ]]; then echo "::notice::Skip repo '$path' (exclude)"; continue; fi
+      - name: Mirror each image:tag to GHCR (multi-arch; preserve digest; no deletions)
+        env:
+          GH_IMAGE_BASE: ${{ steps.ns.outputs.image_repo_base }}
+          GL_ENC: ${{ steps.repos.outputs.gl_enc }}
+        run: |
+          set -euo pipefail
+          repos_json='${{ steps.repos.outputs.repo_list }}'
+          if [[ -z "${repos_json}" || "${repos_json}" == "[]" ]]; then
+            echo "::notice::No container repositories for ${{ matrix.project }}"; exit 0
+          fi
 
-              # Compute GHCR image name
-              if [[ "${CR_NAME_MODE:-path}" == "fullpath" ]]; then
-                IMAGE_NAME="${IMG_BASE}"
-              else
-                sub="${path#${GL_PROJECT}}"; sub="${sub#/}"
-                if [[ -n "$sub" ]]; then
-                  IMAGE_NAME="${IMG_BASE}${GHCR_IMAGE_SEPARATOR:-'-'}${sub//\//${GHCR_IMAGE_SEPARATOR:-'-'}}"
+          mapfile -t repos < <(jq -c '.[]' <<<"${repos_json}")
+          for r in "${repos[@]}"; do
+            rid="$(jq -r '.id' <<<"${r}")"
+            path="$(jq -r '.path' <<<"${r}")"     # e.g. group/project[/subimage]
+            # List tags for this repo
+            tp=1
+            while true; do
+              R="$(mktemp)"; H="$(mktemp)"
+              curl -s -D "$H" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                "${GL_URL%/}/api/v4/projects/${GL_ENC}/registry/repositories/${rid}/tags?per_page=100&page=${tp}" > "$R" || true
+              [[ "$(jq -r 'type' "$R")" != "array" ]] && break
+
+              jq -r '.[].name' "$R" | while read -r tag; do
+                src="docker://${GL_REGISTRY_HOST}/${path}:${tag}"
+                dst="docker://ghcr.io/${GH_OWNER}/${GH_IMAGE_BASE}:${tag}"
+                if [[ "${CR_DRY_RUN:-false}" == "true" ]]; then
+                  echo "DRY-RUN: skopeo copy --all --preserve-digests ${src} ${dst}"
                 else
-                  IMAGE_NAME="${IMG_BASE}"
+                  skopeo copy --all --preserve-digests \
+                    --src-tls-verify=true --dest-tls-verify=true \
+                    "${src}" "${dst}"
                 fi
-              fi
-
-              # Tags (array may be empty)
-              mapfile -t tags < <(jq -r '.tags[].name' <<<"$repo" 2>/dev/null || true)
-              if [[ "${#tags[@]}" -eq 0 ]]; then
-                echo "::notice::No tags in repo '$path'"
-              fi
-
-              for tag in "${tags[@]}"; do
-                if ! [[ "$tag" =~ $include_tag ]]; then echo "::notice::Skip tag '$tag' (include)"; continue; fi
-                if   [[ "$tag" =~ $exclude_tag ]]; then echo "::notice::Skip tag '$tag' (exclude)"; continue; fi
-
-                SRC="docker://${host}/${path}:${tag}"
-                DST="docker://ghcr.io/${GH_OWNER}/${IMAGE_NAME}:${tag}"
-                echo "Mirror: ${SRC}  →  ${DST}"
-
-                [[ "${DRY_RUN}" == "true" ]] && continue
-
-                skopeo copy \
-                  --src-creds "oauth2:${GL_TOKEN}" \
-                  --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-                  "${SRC}" "${DST}"
               done
-            done
 
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-            [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
+              n="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$H" | tr -d '\r')"
+              [[ -z "${n:-}" || "${n}" == "0" ]] && break
+              tp="$n"
+            done
           done
 
-  nothing_to_do:
-    name: "ℹ️ No projects found — skipping mirror"
-    needs: discover_projects
-    if: ${{ needs.discover_projects.outputs.project_count == '0' }}
+  # 3) Package Registry · Discovery plan (ALL projects)
+  package_registry_discovery_all:
+    name: "Package Registry · Discovery Plan (ALL projects)"
+    needs: [discover_projects]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
     steps:
-      - run: echo "::notice::No projects discovered under '${GL_GROUP}'. Nothing to mirror."
+      - name: Install jq & curl
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+
+      - name: Enumerate packages in project (type/name/version)
+        id: pkgs
+        env:
+          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GL_URL: ${{ env.GL_URL }}
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
+          page=1
+          tmp="$(mktemp)"
+          : > "$tmp"
+          while true; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            curl -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/packages?per_page=100&page=${page}" > "$RESP" || true
+            [[ "$(jq -r 'type' "$RESP")" != "array" ]] && break
+            jq -c '.[] | {id, name, version, package_type, _links}' "$RESP" >>"$tmp"
+            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')"
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
+            page="${next}"
+          done
+          echo "list=$(jq -s -c '.' "$tmp")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload discovery as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "package-plan-${{ matrix.project##*/ }}"
+          path: ${{ steps.pkgs.outputs.list }}
+          if-no-files-found: warn
