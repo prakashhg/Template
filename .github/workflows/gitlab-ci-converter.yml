@@ -1734,7 +1734,8 @@ jobs:
           COUNT="$(jq 'length' "${COMB}")"
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
           echo "list=$(jq -c '.' "${COMB}")" >> "$GITHUB_OUTPUT"
-            - name: Prepare GitLab API & encodings
+          
+      - name: Prepare GitLab API & encodings
         id: prep
         env:
           GL_PROJECT: ${{ matrix.project }}
