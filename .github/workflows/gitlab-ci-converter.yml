@@ -1805,30 +1805,276 @@ jobs:
             "$(jq 'length' vars-report.json)" "${REPO_SLUG}"
 
   
-  package_registry_migrate_all_types:
-    name: "10b) GitLab Package Registry → GitHub Packages (npm/Maven/NuGet[+RubyGems])"
+  
+name: GitLab → GitHub (Production Orchestrator)
+
+on:
+  workflow_dispatch:
+    inputs:
+      list_only:
+        description: "List packages/images only (skip publish/copy)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: gitlab-to-github-orchestrator
+  cancel-in-progress: false
+
+env:
+  # ---- Read from GitHub environment/organization variables for consistency ----
+  GL_URL: ${{ vars.GL_URL }}                # e.g., https://gitlab.com
+  GL_GROUP: ${{ vars.GL_GROUP }}            # e.g., my-org/subgroup
+  GH_OWNER: ${{ vars.GH_OWNER }}            # e.g., my-github-org
+  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}         # "path" | "fullpath"
+  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}         # optional prefix
+  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}   # e.g., "-"
+  TAG_INCLUDE_REGEX: ${{ vars.TAG_INCLUDE_REGEX }}   # e.g., .*
+  TAG_EXCLUDE_REGEX: ${{ vars.TAG_EXCLUDE_REGEX }}   # e.g., ^$
+  PACKAGE_TYPES: ${{ vars.PACKAGE_TYPES }}           # e.g., "npm,maven,nuget" or "all"
+  INIT_IF_EMPTY_DEST: ${{ vars.INIT_IF_EMPTY_DEST }} # true | false
+
+jobs:
+  # =========================================================================================
+  # 1) Discover ALL GitLab projects under the group (excludes deletion-scheduled by name)
+  # =========================================================================================
+  discover_projects:
+    name: "1) Discover GitLab projects"
+    runs-on: ubuntu-latest
+    outputs:
+      project_list: ${{ steps.collect.outputs.project_list }}
+    env:
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+    steps:
+      - name: Install jq & curl
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+
+      - name: Collect & filter projects
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${GL_URL:?GL_URL required}"; : "${GL_GROUP:?GL_GROUP required}"
+          GL_API="${GL_URL%/}/api/v4"
+          GROUP_ENC="$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')"
+          MODE="${REPO_NAME_MODE:-path}"
+          PREF="${GH_REPO_PREFIX:-}"
+          SEP="${GH_REPO_SEPARATOR:-"-"}"
+
+          page=1; filtered=()
+          while :; do
+            RESP="$(mktemp)" ; HDR="$(mktemp)"
+            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/groups/${GROUP_ENC}/projects?include_subgroups=true&per_page=100&page=${page}" > "${RESP}"
+            jq -c '.[]' "${RESP}" | while read -r proj; do
+              path="$(jq -r '.path_with_namespace' <<< "${proj}")"
+              [ -z "${path}" ] && continue
+              if [ "${MODE}" = "fullpath" ]; then
+                base="$(echo "${path}" | tr '/' "${SEP}")"
+              else
+                base="${path##*/}"
+              fi
+              dest="${PREF}${base}"
+              if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
+                echo "Exclude deletion-scheduled: ${dest} (from GL: ${path})"
+              else
+                filtered+=("${path}")
+              fi
+            done
+            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
+            [ -z "${next}" ] || [ "${next}" = "0" ] && break
+            page="${next}"
+          done
+          json="$(printf '%s\n' "${filtered[@]}" | jq -R . | jq -s -c .)"
+          echo "project_list=${json}" >> "$GITHUB_OUTPUT"
+
+  # =========================================================================================
+  # 2) Repo Migration – Commit history mirror (ALL projects) + LFS push + repo creation
+  # =========================================================================================
+  repo_migration_commit_sync_all:
+    name: "2) Repo Migration · mirror commits (ALL projects)"
+    needs: [discover_projects]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    env:
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:   ${{ secrets.GH_PAT }}
+      WORKDIR:  /tmp/mirror-work
+    steps:
+      - name: Install jq, curl, git, git-lfs
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl git git-lfs
+          git lfs install
+
+      - name: Compute destination repo name
+        id: repo
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          MODE="${REPO_NAME_MODE:-path}"
+          PREF="${GH_REPO_PREFIX:-}"
+          SEP="${GH_REPO_SEPARATOR:-"-"}"
+          if [ "${MODE}" = "fullpath" ]; then
+            base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
+          else
+            base="${GL_PROJECT##*/}"
+          fi
+          echo "gh_repo=${PREF}${base}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare GitLab API (safe encodings)
+        id: glapi
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          echo "GL_API=${GL_URL%/}/api/v4" >> "$GITHUB_ENV"
+          echo "GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')" >> "$GITHUB_ENV"
+
+      - name: Ensure GitHub repo exists (no deletions)
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          REPO_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}"
+          STATUS="$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" "${REPO_API}")"
+          if [ "${STATUS}" = "200" ]; then
+            echo "Repo ${GH_OWNER}/${GH_REPO} exists."
+          else
+            # create user/org repo
+            MY_LOGIN="$(curl -s -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/user | jq -r '.login')"
+            if [ "${GH_OWNER}" = "${MY_LOGIN}" ]; then
+              CREATE_URL="https://api.github.com/user/repos"
+            else
+              CREATE_URL="https://api.github.com/orgs/${GH_OWNER}/repos"
+            fi
+            PAYLOAD="$(jq -n --arg name "${GH_REPO}" '{name:$name, private:true, has_issues:true, has_projects:true, has_wiki:true}')"
+            RESP="$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+              -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" -d "${PAYLOAD}" "${CREATE_URL}")"
+            HTTP="$(echo "${RESP}" | sed -n 's/^HTTP_STATUS://p')"
+            [ "${HTTP}" = "201" ] || { echo "ERROR: create repo HTTP ${HTTP}"; exit 1; }
+            echo "Created https://github.com/${GH_OWNER}/${GH_REPO}"
+          fi
+
+      - name: Mirror push (commits + tags + LFS)
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${WORKDIR}" && cd "${WORKDIR}"
+          HOST="${GL_URL#*://}"
+          SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${GL_PROJECT}.git"
+          echo "Cloning --mirror from ${SRC_URL}"
+          git clone --mirror "${SRC_URL}" src.git || { echo "WARN: mirror failed"; exit 0; }
+          echo "Local refs preview:"; git -C src.git show-ref | head -n 20 || true
+          cd src.git
+          PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
+          git remote remove github 2>/dev/null || true
+          git remote add github "${PUSH_URL}"
+          echo "Pushing --mirror to ${GH_OWNER}/${GH_REPO}..."
+          git push --mirror github
+          git lfs fetch --all || true
+          git lfs push --all github || true
+
+      - name: Verify branches exist in destination
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          RESP="$(mktemp)"
+          curl --fail-with-body -s -H "Authorization: Bearer ${GH_PAT}" \
+            "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/branches?per_page=100" > "${RESP}" || { head -c 300 "${RESP}" || true; exit 1; }
+          [ "$(jq -r 'type' "${RESP}")" = "array" ] || { echo "ERROR: branches response not array"; exit 1; }
+          COUNT="$(jq 'length' "${RESP}")"
+          [ "${COUNT}" -ge 1 ] || { echo "ERROR: no branches found after mirror"; exit 1; }
+          echo "Destination has ${COUNT} branch(es)."
+
+  # =========================================================================================
+  # 3) Tag sync (ALL projects) – runs after commit mirror
+  # =========================================================================================
+  repo_migration_tag_sync_all:
+    name: "3) Repo Migration · tags sync (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    env:
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:   ${{ secrets.GH_PAT }}
+      WORKDIR:  /tmp/mirror-work
+    steps:
+      - name: Install git
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y git
 
+      - name: Compute destination repo name
+        id: repo
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          MODE="${REPO_NAME_MODE:-path}"
+          PREF="${GH_REPO_PREFIX:-}"
+          SEP="${GH_REPO_SEPARATOR:-"-"}"
+          if [ "${MODE}" = "fullpath" ]; then base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
+          echo "gh_repo=${PREF}${base}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch and push tags
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${WORKDIR}" && cd "${WORKDIR}"
+          HOST="${GL_URL#*://}"
+          SRC_URL="https://oauth2:${GL_TOKEN}@${HOST}/${GL_PROJECT}.git"
+          [ -d src.git ] || git clone --mirror "${SRC_URL}" src.git
+          cd src.git
+          git fetch --tags origin
+          PUSH_URL="https://x-access-token:${GH_PAT}@github.com/${GH_OWNER}/${GH_REPO}.git"
+          git remote remove github 2>/dev/null || true
+          git remote add github "${PUSH_URL}"
+          echo "Pushing tags..."
+          git push --tags github
+
+  # =========================================================================================
+  # 4) Package Registry Migration (npm/Maven/NuGet [+RubyGems]) – ALL projects
+  # =========================================================================================
+  package_registry_migrate_all_types:
+    name: "4) GitLab Package Registry → GitHub Packages (multi-type)"
+    needs: [discover_projects, repo_migration_commit_sync_all]
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.list_only }}
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
         project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-
+    permissions:
+      contents: read
+      packages: write
     env:
-      GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:    ${{ secrets.GH_PAT }}
-      GL_URL:    ${{ vars.GL_URL }}
-      GH_OWNER:  ${{ vars.GH_OWNER }}
-      PACKAGE_TYPES: ${{ vars.PACKAGE_TYPES }} # e.g. "npm,maven,nuget" | "all"
-      LIST_ONLY: "${{ vars.LIST_ONLY }}"       # "true" to show only
-
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:   ${{ secrets.GH_PAT }}
     steps:
-      - name: Install tooling (gh, jq, curl, Node/npm, JDK+Maven, .NET SDK, RubyGems)
+      - name: Install tooling (gh, jq, curl, Node/npm, JDK+Maven, .NET SDK, Ruby)
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -1842,28 +2088,14 @@ jobs:
               sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
             sudo apt-get update -y && sudo apt-get install -y gh
           fi
-          # Node.js + npm (for npm publish)
-          if ! command -v node >/dev/null 2>&1; then
-            sudo apt-get install -y nodejs npm
-          fi
-          # JDK + Maven (for mvn deploy)
-          if ! command -v mvn >/dev/null 2>&1; then
-            sudo apt-get install -y openjdk-17-jdk maven
-          fi
-          # .NET SDK (for dotnet nuget push)
-          if ! command -v dotnet >/dev/null 2>&1; then
-            sudo apt-get install -y dotnet-sdk-8.0 || true
-            if ! command -v dotnet >/dev/null 2>&1; then
-              # fallback channel
-              wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh
-              bash dotnet-install.sh --channel 8.0
-              echo "$HOME/.dotnet" >> $GITHUB_PATH
-            fi
-          fi
+          # node + npm
+          sudo apt-get install -y nodejs npm
+          # JDK + Maven
+          sudo apt-get install -y openjdk-17-jdk maven
+          # .NET SDK
+          sudo apt-get install -y dotnet-sdk-8.0 || true
           # RubyGems (optional)
-          if ! command -v gem >/dev/null 2>&1; then
-            sudo apt-get install -y ruby-full
-          fi
+          sudo apt-get install -y ruby-full
 
       - name: Authenticate to GitHub via gh
         run: |
@@ -1877,18 +2109,34 @@ jobs:
           GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
-          GL_API="${GL_URL%/}/api/v4"
-          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
-          echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
-          echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
+          echo "GL_API=${GL_URL%/}/api/v4" >> "$GITHUB_ENV"
+          echo "GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')" >> "$GITHUB_ENV"
 
-      - name: Discover packages (all types) for project
+      - name: Compute destination repo name
+        id: repo
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          MODE="${REPO_NAME_MODE:-path}"
+          PREF="${GH_REPO_PREFIX:-}"
+          SEP="${GH_REPO_SEPARATOR:-"-"}"
+          if [ "${MODE}" = "fullpath" ]; then base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
+          echo "gh_repo=${PREF}${base}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure destination repo exists
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          gh repo view "${GH_OWNER}/${GH_REPO}" >/dev/null 2>&1 || gh repo create "${GH_OWNER}/${GH_REPO}" --private -y >/dev/null
+
+      - name: List all GitLab packages (paginate)
         id: listpkgs
         run: |
           set -euo pipefail
-          page=1
-          echo "[]" > pkgs.json
-          while true; do
+          page=1; echo "[]" > pkgs.json
+          while :; do
             RESP="$(mktemp)"; HDR="$(mktemp)"
             curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
               "${GL_API}/projects/${GL_ENC}/packages?per_page=100&page=${page}" > "${RESP}"
@@ -1896,71 +2144,58 @@ jobs:
             jq -c '.[]' "${RESP}" | jq -s '.' > batch.json
             jq -c -n --argjson a "$(cat pkgs.json)" --argjson b "$(cat batch.json)" '$a + $b' > pkgs.json
             next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
-            [ -z "${next:-}" ] && break
-            [ "${next}" = "0" ] && break
+            [ -z "${next:-}" ] || [ "${next}" = "0" ] && break
             page="${next}"
           done
           echo "list=$(jq -c '.' pkgs.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Emit summary (by type → name@version)
-        run: |
-          set -euo pipefail
-          LIST='${{ steps.listpkgs.outputs.list }}'
-          n="$(jq 'length' <<< "${LIST}")"
-          echo "::group::${{ matrix.project }} • ${n} package(s)"
-          jq -r '.[] | "\(.package_type)\t\(.name)\t\(.version // "versionless")"' <<< "${LIST}" | sed 's/^/ • /'
-          echo "::endgroup::"
-
-      - name: Configure which types to process
-        id: types
-        run: |
-          set -euo pipefail
-          T="${PACKAGE_TYPES:-npm,maven,nuget}"  # "all" → cover npm,maven,nuget,rubygems
-          if [ "${T}" = "all" ]; then T="npm,maven,nuget,rubygems"; fi
-          echo "types=${T}" >> "$GITHUB_OUTPUT"
-
       # ---------- npm ----------
       - name: Configure npm for GitHub Packages
-        if: contains(steps.types.outputs.types, 'npm')
+        if: contains(env.PACKAGE_TYPES, 'npm') || env.PACKAGE_TYPES == 'all'
         run: |
           set -euo pipefail
           printf "//npm.pkg.github.com/:_authToken=${GH_PAT}\n@${GH_OWNER}:registry=https://npm.pkg.github.com/\n" > "$HOME/.npmrc"
           echo "always-auth=true" >> "$HOME/.npmrc"
 
-      - name: Migrate npm packages
-        if: contains(steps.types.outputs.types, 'npm')
+      - name: Migrate npm packages (rescope & publish)
+        if: contains(env.PACKAGE_TYPES, 'npm') || env.PACKAGE_TYPES == 'all'
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           LIST='${{ steps.listpkgs.outputs.list }}'
           npm_list="$(jq -c '[.[] | select(.package_type=="npm" and (.version!=null))]' <<< "${LIST}")"
           count="$(jq 'length' <<< "${npm_list}")"
           [ "${count}" -lt 1 ] && { echo "::notice::No npm packages"; exit 0; }
-          if [ "${LIST_ONLY:-}" = "true" ]; then echo "::notice::LIST_ONLY=true (skip publish)"; exit 0; fi
-
           for i in $(seq 0 $((count-1))); do
-            id="$(jq -r ".[$i].id"       <<< "${npm_list}")"
-            name="$(jq -r ".[$i].name"   <<< "${npm_list}")"
-            ver="$(jq -r  ".[$i].version"<<< "${npm_list}")"
-
-            # fetch package files for this package id, pick .tgz
-            FILES="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
-            tgz_id="$(jq -r '[.[] | select(.file_name|endswith(".tgz"))][0].id' <<< "${FILES}")"
-            if [ -z "${tgz_id}" ] || [ "${tgz_id}" = "null" ]; then
-              echo "::warning::No .tgz for ${name}@${ver}"; continue
-            fi
-            URL="${GL_URL%/}/-/package_files/${tgz_id}/download"
+            id="$(jq -r ".[$i].id" <<< "${npm_list}")"
+            name="$(jq -r ".[$i].name" <<< "${npm_list}")"
+            ver="$(jq -r ".[$i].version" <<< "${npm_list}")"
+            files="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
+            tgz_id="$(jq -r '[.[] | select(.file_name|endswith(".tgz"))][0].id' <<< "${files}")"
+            [ -n "${tgz_id}" ] && [ "${tgz_id}" != "null" ] || { echo "::warning::No tgz for ${name}@${ver}"; continue; }
+            # download & rescope to @GH_OWNER
             TMPD="$(mktemp -d)"; cd "${TMPD}"
-            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -O "${URL}"
-            tgz="$(ls *.tgz | head -n1)"
-            echo "npm publish ${name}@${ver} → GitHub"
-            npm publish "${tgz}" --registry "https://npm.pkg.github.com"
+            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -O "${GL_URL%/}/-/package_files/${tgz_id}/download"
+            TAR="$(ls *.tgz | head -n1)"
+            mkdir src && tar -xzf "${TAR}" -C src
+            PKGJSON="src/package/package.json"
+            CURR="$(jq -r '.name' "${PKGJSON}")"
+            NEW="@${GH_OWNER}/$(basename "${CURR}")"
+            if [[ "${CURR}" != @${GH_OWNER}/* ]]; then
+              jq --arg n "${NEW}" '.name=$n' "${PKGJSON}" > "${PKGJSON}.new" && mv "${PKGJSON}.new" "${PKGJSON}"
+            fi
+            tar -czf fixed.tgz -C src package
+            # publish to GitHub npm registry (org-level; link via UI if needed)
+            echo "Publishing npm ${NEW}@${ver} → GitHub Packages"
+            npm publish fixed.tgz --registry "https://npm.pkg.github.com"
             cd - >/dev/null
           done
+          echo "::notice::npm packages published at org level; connect to repo if needed."  # UI connect step per docs
 
       # ---------- Maven ----------
-      - name: Prepare Maven settings.xml for GitHub Packages
-        if: contains(steps.types.outputs.types, 'maven')
+      - name: Prepare Maven settings.xml (GitHub Packages)
+        if: contains(env.PACKAGE_TYPES, 'maven') || env.PACKAGE_TYPES == 'all'
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.m2"
@@ -1974,93 +2209,78 @@ jobs:
               </server>
             </servers>
           </settings>
-          SET
+         SET
 
-      - name: Migrate Maven packages
-        if: contains(steps.types.outputs.types, 'maven')
+      - name: Migrate Maven packages (deploy to repo path)
+        if: contains(env.PACKAGE_TYPES, 'maven') || env.PACKAGE_TYPES == 'all'
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
           LIST='${{ steps.listpkgs.outputs.list }}'
           maven_list="$(jq -c '[.[] | select(.package_type=="maven" and (.version!=null))]' <<< "${LIST}")"
           count="$(jq 'length' <<< "${maven_list}")"
           [ "${count}" -lt 1 ] && { echo "::notice::No Maven packages"; exit 0; }
-          if [ "${LIST_ONLY:-}" = "true" ]; then echo "::notice::LIST_ONLY=true (skip publish)"; exit 0; fi
-
           for i in $(seq 0 $((count-1))); do
             id="$(jq -r ".[$i].id"       <<< "${maven_list}")"
             name="$(jq -r ".[$i].name"   <<< "${maven_list}")"   # e.g., com/example/my-lib
             ver="$(jq -r  ".[$i].version"<<< "${maven_list}")"
             artifact="$(basename "${name}")"
-
-            FILES="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
-            pom_id="$(jq -r '[.[] | select(.file_name|endswith(".pom"))][0].id' <<< "${FILES}")"
-            jar_id="$(jq -r '[.[] | select(.file_name|test("\\\\.(jar|war|aar)$"))][0].id' <<< "${FILES}")"
-
-            if [ -z "${pom_id}" ] || [ "${pom_id}" = "null" ]; then
-              echo "::warning::No POM for ${name}:${ver}"; continue
-            fi
+            files="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
+            pom_id="$(jq -r '[.[] | select(.file_name|endswith(".pom"))][0].id' <<< "${files}")"
+            bin_id="$(jq -r '[.[] | select(.file_name|test("\\.(jar|war|aar)$"))][0].id' <<< "${files}")"
+            [ -n "${pom_id}" ] && [ "${pom_id}" != "null" ] || { echo "::warning::No POM for ${name}:${ver}"; continue; }
             TMPD="$(mktemp -d)"; cd "${TMPD}"
             curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -o "${artifact}-${ver}.pom" \
               "${GL_URL%/}/-/package_files/${pom_id}/download"
-            if [ -n "${jar_id}" ] && [ "${jar_id}" != "null" ]; then
+            if [ -n "${bin_id}" ] && [ "${bin_id}" != "null" ]; then
               curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -o "${artifact}-${ver}.jar" \
-                "${GL_URL%/}/-/package_files/${jar_id}/download"
+                "${GL_URL%/}/-/package_files/${bin_id}/download"
             else
-              # If no binary, deploy POM-only
-              touch "${artifact}-${ver}.jar"
+              # create an empty jar for deploy-file (POM-only)
+              echo "Creating placeholder jar for ${artifact}-${ver}"
+              echo "placeholder" > "${artifact}-${ver}.jar"
             fi
-
-            DEST_REPO="${GH_OWNER}/${artifact}"
-            gh repo view "${DEST_REPO}" >/dev/null 2>&1 || gh repo create "${DEST_REPO}" --private -y >/dev/null
-
+            DEST_REPO="${GH_OWNER}/${GH_REPO}"  # link via repo path
             mvn -B deploy:deploy-file \
               -Dfile="${artifact}-${ver}.jar" \
               -DpomFile="${artifact}-${ver}.pom" \
               -DrepositoryId=github \
               -Durl="https://maven.pkg.github.com/${DEST_REPO}"
-
             cd - >/dev/null
           done
 
       # ---------- NuGet ----------
       - name: Migrate NuGet packages
-        if: contains(steps.types.outputs.types, 'nuget')
+        if: contains(env.PACKAGE_TYPES, 'nuget') || env.PACKAGE_TYPES == 'all'
         run: |
           set -euo pipefail
           LIST='${{ steps.listpkgs.outputs.list }}'
           nupkg_list="$(jq -c '[.[] | select(.package_type=="nuget" and (.version!=null))]' <<< "${LIST}")"
           count="$(jq 'length' <<< "${nupkg_list}")"
           [ "${count}" -lt 1 ] && { echo "::notice::No NuGet packages"; exit 0; }
-          if [ "${LIST_ONLY:-}" = "true" ]; then echo "::notice::LIST_ONLY=true (skip publish)"; exit 0; fi
-
           for i in $(seq 0 $((count-1))); do
             id="$(jq -r ".[$i].id"       <<< "${nupkg_list}")"
             name="$(jq -r ".[$i].name"   <<< "${nupkg_list}")"
             ver="$(jq -r  ".[$i].version"<<< "${nupkg_list}")"
-
-            FILES="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
-            nupkg_id="$(jq -r '[.[] | select(.file_name|endswith(".nupkg"))][0].id' <<< "${FILES}")"
-            if [ -z "${nupkg_id}" ] || [ "${nupkg_id}" = "null" ]; then
-              echo "::warning::No .nupkg for ${name} ${ver}"; continue
-            fi
-
+            files="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
+            nupkg_id="$(jq -r '[.[] | select(.file_name|endswith(".nupkg"))][0].id' <<< "${files}")"
+            [ -n "${nupkg_id}" ] && [ "${nupkg_id}" != "null" ] || { echo "::warning::No .nupkg for ${name} ${ver}"; continue; }
             TMPD="$(mktemp -d)"; cd "${TMPD}"
-            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -O \
-              "${GL_URL%/}/-/package_files/${nupkg_id}/download"
+            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -O "${GL_URL%/}/-/package_files/${nupkg_id}/download"
             PKG="$(ls *.nupkg | head -n1)"
-            echo "dotnet nuget push ${PKG} → GitHub"
+            echo "dotnet nuget push ${PKG} → GitHub Packages (org level)"
             dotnet nuget push "${PKG}" \
               --api-key "${GH_PAT}" \
               --source "https://nuget.pkg.github.com/${GH_OWNER}/index.json" \
               --skip-duplicate
             cd - >/dev/null
           done
+          echo "::notice::NuGet packages published at org level; connect to repo if needed."
 
       # ---------- RubyGems (optional) ----------
       - name: Configure RubyGems (GitHub Packages)
-        if: contains(steps.types.outputs.types, 'rubygems')
+        if: contains(env.PACKAGE_TYPES, 'rubygems') || env.PACKAGE_TYPES == 'all'
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.gem"
@@ -2068,31 +2288,170 @@ jobs:
           chmod 0600 "$HOME/.gem/credentials"
 
       - name: Migrate RubyGems packages
-        if: contains(steps.types.outputs.types, 'rubygems')
+        if: contains(env.PACKAGE_TYPES, 'rubygems') || env.PACKAGE_TYPES == 'all'
         run: |
           set -euo pipefail
           LIST='${{ steps.listpkgs.outputs.list }}'
           gems_list="$(jq -c '[.[] | select(.package_type=="rubygems" and (.version!=null))]' <<< "${LIST}")"
           count="$(jq 'length' <<< "${gems_list}")"
           [ "${count}" -lt 1 ] && { echo "::notice::No RubyGems packages"; exit 0; }
-          if [ "${LIST_ONLY:-}" = "true" ]; then echo "::notice::LIST_ONLY=true (skip publish)"; exit 0; fi
-
           for i in $(seq 0 $((count-1))); do
             id="$(jq -r ".[$i].id"       <<< "${gems_list}")"
             name="$(jq -r ".[$i].name"   <<< "${gems_list}")"
             ver="$(jq -r  ".[$i].version"<<< "${gems_list}")"
-
-            FILES="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
-            gem_id="$(jq -r '[.[] | select(.file_name|endswith(".gem"))][0].id' <<< "${FILES}")"
-            if [ -z "${gem_id}" ] || [ "${gem_id}" = "null" ]; then
-              echo "::warning::No .gem for ${name} ${ver}"; continue
-            fi
-
+            files="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
+            gem_id="$(jq -r '[.[] | select(.file_name|endswith(".gem"))][0].id' <<< "${files}")"
+            [ -n "${gem_id}" ] && [ "${gem_id}" != "null" ] || { echo "::warning::No .gem for ${name} ${ver}"; continue; }
             TMPD="$(mktemp -d)"; cd "${TMPD}"
-            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -O \
-              "${GL_URL%/}/-/package_files/${gem_id}/download"
+            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -O "${GL_URL%/}/-/package_files/${gem_id}/download"
             GEM="$(ls *.gem | head -n1)"
             gem push --key github --host "https://rubygems.pkg.github.com/${GH_OWNER}" "${GEM}"
             cd - >/dev/null
+          done
+          echo "::notice::RubyGems packages published at org level; connect to repo if needed."
+
+  # =========================================================================================
+  # 5) Container Registry Migration – GitLab → GHCR (ALL projects)
+  # =========================================================================================
+  container_registry_migrate_all:
+    name: "5) GitLab Container Registry → GHCR (ALL projects)"
+    needs: [discover_projects, repo_migration_commit_sync_all]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:   ${{ secrets.GH_PAT }}
+    steps:
+      - name: Install jq, curl, skopeo & gh; ensure buildx
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl skopeo
+          if ! command -v gh >/dev/null 2>&1; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
+              sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
+              sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            sudo apt-get update -y && sudo apt-get install -y gh
+          fi
+          docker buildx version || { sudo apt-get update -y && sudo apt-get install -y docker-buildx; }
+
+      - name: Authenticate gh
+        run: |
+          set -euo pipefail
+          echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
+          gh auth status
+
+      - name: Resolve GH username (for GHCR login)
+        id: ghuser
+        run: |
+          set -euo pipefail
+          me="$(gh api user --jq .login)"
+          [ -n "${me}" ] || { echo "Unable to resolve GH username"; exit 1; }
+          echo "user=${me}" >> "$GITHUB_OUTPUT"
+
+      - name: List GitLab registry repositories (+tags)
+        id: repos
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
+          page=1; echo "[]" > repos.json
+          while :; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/registry/repositories?tags=1&tags_count=true&per_page=100&page=${page}" > "${RESP}"
+            if [ "$(jq -r 'type' "${RESP}")" != "array" ]; then break; fi
+            jq -c '.[]' "${RESP}" | jq -s '.' > batch.json
+            jq -c -n --argjson a "$(cat repos.json)" --argjson b "$(cat batch.json)" '$a + $b' > repos.json
+            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
+            [ -z "${next:-}" ] || [ "${next}" = "0" ] && break
+            page="${next}"
+          done
+          echo "list=$(jq -c '.' repos.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Login to registries (GitLab & GHCR)
+        env:
+          GH_USER: ${{ steps.ghuser.outputs.user }}
+        run: |
+          set -euo pipefail
+          GL_REG_HOST="registry.gitlab.com"
+          skopeo login --username "${GL_REGISTRY_USER:-gitlab-ci-token}" --password "${GL_TOKEN}" "${GL_REG_HOST}"
+          skopeo login --username "${GH_USER}" --password "${GH_PAT}" ghcr.io
+
+      - name: Copy images & tags to GHCR (preserve structure)
+        run: |
+          set -euo pipefail
+          LIST='${{ steps.repos.outputs.list }}'
+          INCLUDE="${TAG_INCLUDE_REGEX:-.*}"
+          EXCLUDE="${TAG_EXCLUDE_REGEX:-^$}"
+          count="$(jq 'length' <<< "${LIST}")"
+          [ "${count}" -lt 1 ] && { echo "::notice::No images to migrate"; exit 0; }
+          for i in $(seq 0 $((count-1))); do
+            path="$(jq -r ".[$i].path" <<< "${LIST}")"
+            gl_location="$(jq -r ".[$i].location" <<< "${LIST}")"
+            gl_host="$(echo "${gl_location}" | sed -E 's#https?://([^/]+)/.*#\1#')"
+            tags_len="$(jq -r ".[$i].tags | length" <<< "${LIST}")"
+            [ "${tags_len}" -lt 1 ] && { echo "::notice::No tags in ${path}"; continue; }
+            for t in $(seq 0 $((tags_len-1))); do
+              tag="$(jq -r ".[$i].tags[$t].name" <<< "${LIST}")"
+              [[ "${tag}" =~ ${INCLUDE} ]] || { echo "::notice::skip ${path}:${tag} (not included)"; continue; }
+              [[ "${tag}" =~ ${EXCLUDE} ]] && { echo "::notice::skip ${path}:${tag} (excluded)"; continue; }
+              SRC="docker://${gl_host}/${path}:${tag}"
+              DEST="docker://ghcr.io/${GH_OWNER}/${path}:${tag}"
+              echo "Copy ${SRC} → ${DEST}"
+              skopeo copy --all --retry-times 3 "${SRC}" "${DEST}"
+            done
+          done
+
+      - name: Compute GH repo name (for OCI annotation link)
+        id: repo
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          MODE="${REPO_NAME_MODE:-path}"
+          PREF="${GH_REPO_PREFIX:-}"
+          SEP="${GH_REPO_SEPARATOR:-"-"}"
+          if [ "${MODE}" = "fullpath" ]; then base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"; else base="${GL_PROJECT##*/}"; fi
+          echo "gh_repo=${PREF}${base}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure destination repo exists
+        env:
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          gh repo view "${GH_OWNER}/${GH_REPO}" >/dev/null 2>&1 || gh repo create "${GH_OWNER}/${GH_REPO}" --private -y >/dev/null
+
+      - name: Annotate GHCR images with repo source (OCI metadata)
+        env:
+          REPO_URL: https://github.com/${{ env.GH_OWNER }}/${{ steps.repo.outputs.gh_repo }}
+        run: |
+          set -euo pipefail
+          LIST='${{ steps.repos.outputs.list }}'
+          count="$(jq 'length' <<< "${LIST}")"
+          [ "${count}" -lt 1 ] && { echo "::notice::No images to annotate"; exit 0; }
+          for i in $(seq 0 $((count-1))); do
+            path="$(jq -r ".[$i].path" <<< "${LIST}")"
+            tags_len="$(jq -r ".[$i].tags | length" <<< "${LIST}")"
+            [ "${tags_len}" -lt 1 ] && continue
+            for t in $(seq 0 $((tags_len-1))); do
+              tag="$(jq -r ".[$i].tags[$t].name" <<< "${LIST}")"
+              IMG="ghcr.io/${GH_OWNER}/${path}:${tag}"
+              echo "Annotate ${IMG} with source=${REPO_URL}"
+              docker buildx imagetools create \
+                --annotation "index:org.opencontainers.image.source=${REPO_URL}" \
+                --tag "${IMG}" \
+                "${IMG}"
+            done
           done
