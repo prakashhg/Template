@@ -1834,18 +1834,20 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl skopeo
 
+      
       - name: Compute destination repo name (preserve your policy)
         id: repo
-        env: { GL_PROJECT: ${{ matrix.project }} }
+        env:
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
           MODE="${REPO_NAME_MODE:-path}"
           PREF="${GH_REPO_PREFIX:-}"
-          SEP="${GH_REPO_SEPARATOR:-"-"}"
+          SEP="${GH_REPO_SEPARATOR:-'-'}"
           if [[ "$MODE" == "fullpath" ]]; then
-            base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
+          base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
           else
-            base="${GL_PROJECT##*/}"
+          base="${GL_PROJECT##*/}"
           fi
           GH_REPO="${PREF}${base}"
           echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
