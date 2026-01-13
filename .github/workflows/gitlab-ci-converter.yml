@@ -1734,108 +1734,6 @@ jobs:
           COUNT="$(jq 'length' "${COMB}")"
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
           echo "list=$(jq -c '.' "${COMB}")" >> "$GITHUB_OUTPUT"
-          
-      - name: Prepare GitLab API & encodings
-        id: prep
-        env:
-          GL_PROJECT: ${{ matrix.project }}
-        run: |
-          set -euo pipefail
-          GL_API="${GL_URL%/}/api/v4"
-          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
-          echo "gl_api=${GL_API}" >> "$GITHUB_OUTPUT"
-          echo "gl_enc=${GL_ENC}" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve registry hosts
-        id: host
-        run: |
-          set -euo pipefail
-          if [[ -n "${GL_REGISTRY_URL:-}" ]]; then
-            SRC_REG="${GL_REGISTRY_URL%/}"
-          else
-            # best-effort guess: registry.<gitlab-host>
-            host="${GL_URL#*://}"; host="${host%%/*}"
-            SRC_REG="registry.${host}"
-          fi
-          DEST_REG="ghcr.io"
-          echo "src=${SRC_REG}"  >> "$GITHUB_OUTPUT"
-          echo "dst=${DEST_REG}" >> "$GITHUB_OUTPUT"
-          echo "Using source registry: $SRC_REG; destination: $DEST_REG"
-
-      - name: Enumerate container repositories under project
-        id: repos
-        run: |
-          set -euo pipefail
-          page=1
-          out="[]"
-          while true; do
-            RESP=$(mktemp); HDR=$(mktemp)
-            if ! curl --fail-with-body -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-                 "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/registry/repositories?per_page=100&page=${page}" > "$RESP"; then
-              echo "::notice::No container repositories or no access for ${{ matrix.project }}"
-              break
-            fi
-            typ=$(jq -r 'type' "$RESP" 2>/dev/null || echo "null")
-            [[ "$typ" == "array" ]] || break
-            out=$(jq -c --argjson A "$out" --argjson B "$(cat "$RESP")" '$A + $B' <<<"")
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
-            [[ -z "${next:-}" || "$next" == "0" ]] && break
-            page="$next"
-          done
-          echo "list=${out}" >> "$GITHUB_OUTPUT"
-
-      - name: Copy all tags (repo-by-repo) → GHCR (non-destructive)
-        if: ${{ steps.repos.outputs.list != '' && steps.repos.outputs.list != '[]' }}
-        env:
-          SRC_REG: ${{ steps.host.outputs.src }}
-          DST_REG: ${{ steps.host.outputs.dst }}
-        run: |
-          set -euo pipefail
-          repos='${{ steps.repos.outputs.list }}'
-          count=$(jq 'length' <<<"$repos")
-          echo "Found $count container repository(ies) under ${{ matrix.project }}"
-
-          # Login to GHCR (dest)
-          echo "${GH_PAT}" | skopeo login --username "${GH_OWNER}" --password-stdin "$DST_REG"
-          # Login to GitLab Container Registry (source). SaaS often supports oauth2+PAT.
-          skopeo login --username "${GL_CR_USER:-oauth2}" --password "${GL_CR_PASSWORD:-$GL_TOKEN}" "$SRC_REG" >/dev/null 2>&1 || true
-
-          # Iterate repositories
-          idx=0
-          while (( idx < count )); do
-            rid=$(jq -r ".[$idx].id"    <<<"$repos")
-            path=$(jq -r ".[$idx].path"  <<<"$repos")   # e.g., group/project/image
-            dpath="${GHCR_PREFIX:-}${path}"             # preserve structure in GHCR
-
-            # Page through tags
-            tpage=1
-            while true; do
-              TRESP=$(mktemp); THDR=$(mktemp)
-              if ! curl --fail-with-body -s -D "$THDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-                   "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/registry/repositories/${rid}/tags?per_page=100&page=${tpage}" > "$TRESP"; then
-                echo "::notice::No tags for $path"; break
-              fi
-              [[ "$(jq -r 'type' "$TRESP")" == "array" ]] || break
-
-              while read -r tag; do
-                src="docker://${SRC_REG}/${path}:${tag}"
-                dst="docker://${DST_REG}/${GH_OWNER}/${dpath}:${tag}"
-                echo "→ Copy $src  →  $dst"
-                skopeo copy --retry-times 3 --src-tls-verify=false --dest-tls-verify=true \
-                  --src-creds "${GL_CR_USER:-oauth2}:${GL_CR_PASSWORD:-$GL_TOKEN}" \
-                  --dest-creds "${GH_OWNER}:${GH_PAT}" \
-                  "$src" "$dst"
-                sleep 1
-              done < <(jq -r '.[].name' "$TRESP")
-
-              tnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$THDR" | tr -d '\r')
-              [[ -z "${tnext:-}" || "$tnext" == "0" ]] && break
-              tpage="$tnext"
-            done
-
-            idx=$((idx+1))
-          done
-
 
       - name: Upsert to GitHub (repo/env secrets & variables); create environments as needed
         if: steps.vars.outputs.count != '0'
@@ -1906,3 +1804,132 @@ jobs:
           jq -s '.' "${REPORT}" > vars-report.json
           printf "Migrated %s variable(s) to %s\n" \
             "$(jq 'length' vars-report.json)" "${REPO_SLUG}"
+
+  # 10) Package Migration · Container Registry (ALL projects) — runs after dry-run
+  package_migration_container_registry_all:
+    name: "10) Package Migration · Container Registry (ALL projects) — after dry-run"
+    needs: [discover_projects, ci_migration_dry_run_all]
+    # Run after dry-run completes (even if some matrix entries failed); skip only if explicitly disabled
+    if: ${{ always() && vars.MIGRATE_CONTAINER_REGISTRY != 'false' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    env:
+      GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:     ${{ secrets.GH_PAT }}
+      GL_URL:     ${{ vars.GL_URL }}
+      GH_OWNER:   ${{ vars.GH_OWNER }}
+      # Optional (recommended for self-managed GitLab): e.g., registry.gitlab.example.com
+      GL_REGISTRY_URL: ${{ vars.GL_REGISTRY_URL }}
+      # Optional prefix to keep lineage in GHCR, e.g., "gitlab/"
+      GHCR_PREFIX: ${{ vars.GHCR_PREFIX }}
+    steps:
+      - name: Install jq, curl, skopeo
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl skopeo
+
+      - name: Prepare GitLab API & encodings
+        id: prep
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
+          echo "gl_api=${GL_API}" >> "$GITHUB_OUTPUT"
+          echo "gl_enc=${GL_ENC}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve registry hosts
+        id: host
+        run: |
+          set -euo pipefail
+          if [[ -n "${GL_REGISTRY_URL:-}" ]]; then
+            SRC_REG="${GL_REGISTRY_URL%/}"
+          else
+            # best-effort guess: registry.<gitlab-host>
+            host="${GL_URL#*://}"; host="${host%%/*}"
+            SRC_REG="registry.${host}"
+          fi
+          DEST_REG="ghcr.io"
+          echo "src=${SRC_REG}"  >> "$GITHUB_OUTPUT"
+          echo "dst=${DEST_REG}" >> "$GITHUB_OUTPUT"
+          echo "Using source registry: $SRC_REG; destination: $DEST_REG"
+
+      - name: Enumerate container repositories under project
+        id: repos
+        run: |
+          set -euo pipefail
+          page=1
+          out="[]"
+          while true; do
+            RESP=$(mktemp); HDR=$(mktemp)
+            if ! curl --fail-with-body -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                 "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/registry/repositories?per_page=100&page=${page}" > "$RESP"; then
+              echo "::notice::No container repositories or no access for ${{ matrix.project }}"
+              break
+            fi
+            typ=$(jq -r 'type' "$RESP" 2>/dev/null || echo "null")
+            [[ "$typ" == "array" ]] || break
+            out=$(jq -c --argjson A "$out" --argjson B "$(cat "$RESP")" '$A + $B' <<<"")
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+            [[ -z "${next:-}" || "$next" == "0" ]] && break
+            page="$next"
+          done
+          echo "list=${out}" >> "$GITHUB_OUTPUT"
+
+      - name: Copy all tags (repo-by-repo) → GHCR (non-destructive)
+        if: ${{ steps.repos.outputs.list != '' && steps.repos.outputs.list != '[]' }}
+        env:
+          SRC_REG: ${{ steps.host.outputs.src }}
+          DST_REG: ${{ steps.host.outputs.dst }}
+        run: |
+          set -euo pipefail
+          repos='${{ steps.repos.outputs.list }}'
+          count=$(jq 'length' <<<"$repos")
+          echo "Found $count container repository(ies) under ${{ matrix.project }}"
+
+          # Login to GHCR (dest)
+          echo "${GH_PAT}" | skopeo login --username "${GH_OWNER}" --password-stdin "$DST_REG"
+          # Login to GitLab Container Registry (source). SaaS often supports oauth2+PAT.
+          skopeo login --username "${GL_CR_USER:-oauth2}" --password "${GL_CR_PASSWORD:-$GL_TOKEN}" "$SRC_REG" >/dev/null 2>&1 || true
+
+          # Iterate repositories
+          idx=0
+          while (( idx < count )); do
+            rid=$(jq -r ".[$idx].id"   <<<"$repos")
+            path=$(jq -r ".[$idx].path"<<<"$repos")   # e.g., group/project/image
+            dpath="${GHCR_PREFIX:-}${path}"           # preserve structure in GHCR
+
+            # Page through tags
+            tpage=1
+            while true; do
+              TRESP=$(mktemp); THDR=$(mktemp)
+              if ! curl --fail-with-body -s -D "$THDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                   "${{ steps.prep.outputs.gl_api }}/projects/${{ steps.prep.outputs.gl_enc }}/registry/repositories/${rid}/tags?per_page=100&page=${tpage}" > "$TRESP"; then
+                echo "::notice::No tags for $path"; break
+              fi
+              [[ "$(jq -r 'type' "$TRESP")" == "array" ]] || break
+
+              while read -r tag; do
+                src="docker://${SRC_REG}/${path}:${tag}"
+                dst="docker://${DST_REG}/${GH_OWNER}/${dpath}:${tag}"
+                echo "→ Copy $src  →  $dst"
+                skopeo copy --retry-times 3 --src-tls-verify=false --dest-tls-verify=true \
+                  --src-creds "${GL_CR_USER:-oauth2}:${GL_CR_PASSWORD:-$GL_TOKEN}" \
+                  --dest-creds "${GH_OWNER}:${GH_PAT}" \
+                  "$src" "$dst"
+                sleep 1
+              done < <(jq -r '.[].name' "$TRESP")
+
+              tnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$THDR" | tr -d '\r')
+              [[ -z "${tnext:-}" || "$tnext" == "0" ]] && break
+              tpage="$tnext"
+            done
+
+            idx=$((idx+1))
+          done
