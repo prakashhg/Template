@@ -1685,7 +1685,6 @@ jobs:
           : "${GL_API:?}"; : "${GL_ENC:?}"
           G_LIST="$(mktemp)"; P_LIST="$(mktemp)"
           : > "${G_LIST}"; : > "${P_LIST}"
-
           # Group variables (optional)
           if [[ -n "${GROUP_ENC:-}" ]]; then
             page="1"
@@ -1805,10 +1804,295 @@ jobs:
           printf "Migrated %s variable(s) to %s\n" \
             "$(jq 'length' vars-report.json)" "${REPO_SLUG}"
 
-      - name: Upload migration report (no values)
-        if: steps.vars.outputs.count != '0'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vars-migration-${{ steps.repo.outputs.gh_repo }}
-          path: vars-report.json
-          compression-level: 6
+  
+  package_registry_migrate_all_types:
+    name: "10b) GitLab Package Registry → GitHub Packages (npm/Maven/NuGet[+RubyGems])"
+    needs: [discover_projects, repo_migration_commit_sync_all]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+
+    env:
+      GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}
+      GH_PAT:    ${{ secrets.GH_PAT }}
+      GL_URL:    ${{ vars.GL_URL }}
+      GH_OWNER:  ${{ vars.GH_OWNER }}
+      PACKAGE_TYPES: ${{ vars.PACKAGE_TYPES }} # e.g. "npm,maven,nuget" | "all"
+      LIST_ONLY: "${{ vars.LIST_ONLY }}"       # "true" to show only
+
+    steps:
+      - name: Install tooling (gh, jq, curl, Node/npm, JDK+Maven, .NET SDK, RubyGems)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl ca-certificates gnupg
+          # gh
+          if ! command -v gh >/dev/null 2>&1; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
+              sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
+              sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            sudo apt-get update -y && sudo apt-get install -y gh
+          fi
+          # Node.js + npm (for npm publish)
+          if ! command -v node >/dev/null 2>&1; then
+            sudo apt-get install -y nodejs npm
+          fi
+          # JDK + Maven (for mvn deploy)
+          if ! command -v mvn >/dev/null 2>&1; then
+            sudo apt-get install -y openjdk-17-jdk maven
+          fi
+          # .NET SDK (for dotnet nuget push)
+          if ! command -v dotnet >/dev/null 2>&1; then
+            sudo apt-get install -y dotnet-sdk-8.0 || true
+            if ! command -v dotnet >/dev/null 2>&1; then
+              # fallback channel
+              wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh
+              bash dotnet-install.sh --channel 8.0
+              echo "$HOME/.dotnet" >> $GITHUB_PATH
+            fi
+          fi
+          # RubyGems (optional)
+          if ! command -v gem >/dev/null 2>&1; then
+            sudo apt-get install -y ruby-full
+          fi
+
+      - name: Authenticate to GitHub via gh
+        run: |
+          set -euo pipefail
+          echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
+          gh auth status
+
+      - name: Prepare GitLab API & encodings
+        id: prep
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
+          echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
+          echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
+
+      - name: Discover packages (all types) for project
+        id: listpkgs
+        run: |
+          set -euo pipefail
+          page=1
+          echo "[]" > pkgs.json
+          while true; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/packages?per_page=100&page=${page}" > "${RESP}"
+            if [ "$(jq -r 'type' "${RESP}")" != "array" ]; then break; fi
+            jq -c '.[]' "${RESP}" | jq -s '.' > batch.json
+            jq -c -n --argjson a "$(cat pkgs.json)" --argjson b "$(cat batch.json)" '$a + $b' > pkgs.json
+            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
+            [ -z "${next:-}" ] && break
+            [ "${next}" = "0" ] && break
+            page="${next}"
+          done
+          echo "list=$(jq -c '.' pkgs.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Emit summary (by type → name@version)
+        run: |
+          set -euo pipefail
+          LIST='${{ steps.listpkgs.outputs.list }}'
+          n="$(jq 'length' <<< "${LIST}")"
+          echo "::group::${{ matrix.project }} • ${n} package(s)"
+          jq -r '.[] | "\(.package_type)\t\(.name)\t\(.version // "versionless")"' <<< "${LIST}" | sed 's/^/ • /'
+          echo "::endgroup::"
+
+      - name: Configure which types to process
+        id: types
+        run: |
+          set -euo pipefail
+          T="${PACKAGE_TYPES:-npm,maven,nuget}"  # "all" → cover npm,maven,nuget,rubygems
+          if [ "${T}" = "all" ]; then T="npm,maven,nuget,rubygems"; fi
+          echo "types=${T}" >> "$GITHUB_OUTPUT"
+
+      # ---------- npm ----------
+      - name: Configure npm for GitHub Packages
+        if: contains(steps.types.outputs.types, 'npm')
+        run: |
+          set -euo pipefail
+          printf "//npm.pkg.github.com/:_authToken=${GH_PAT}\n@${GH_OWNER}:registry=https://npm.pkg.github.com/\n" > "$HOME/.npmrc"
+          echo "always-auth=true" >> "$HOME/.npmrc"
+
+      - name: Migrate npm packages
+        if: contains(steps.types.outputs.types, 'npm')
+        run: |
+          set -euo pipefail
+          LIST='${{ steps.listpkgs.outputs.list }}'
+          npm_list="$(jq -c '[.[] | select(.package_type=="npm" and (.version!=null))]' <<< "${LIST}")"
+          count="$(jq 'length' <<< "${npm_list}")"
+          [ "${count}" -lt 1 ] && { echo "::notice::No npm packages"; exit 0; }
+          if [ "${LIST_ONLY:-}" = "true" ]; then echo "::notice::LIST_ONLY=true (skip publish)"; exit 0; fi
+
+          for i in $(seq 0 $((count-1))); do
+            id="$(jq -r ".[$i].id"       <<< "${npm_list}")"
+            name="$(jq -r ".[$i].name"   <<< "${npm_list}")"
+            ver="$(jq -r  ".[$i].version"<<< "${npm_list}")"
+
+            # fetch package files for this package id, pick .tgz
+            FILES="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
+            tgz_id="$(jq -r '[.[] | select(.file_name|endswith(".tgz"))][0].id' <<< "${FILES}")"
+            if [ -z "${tgz_id}" ] || [ "${tgz_id}" = "null" ]; then
+              echo "::warning::No .tgz for ${name}@${ver}"; continue
+            fi
+            URL="${GL_URL%/}/-/package_files/${tgz_id}/download"
+            TMPD="$(mktemp -d)"; cd "${TMPD}"
+            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -O "${URL}"
+            tgz="$(ls *.tgz | head -n1)"
+            echo "npm publish ${name}@${ver} → GitHub"
+            npm publish "${tgz}" --registry "https://npm.pkg.github.com"
+            cd - >/dev/null
+          done
+
+      # ---------- Maven ----------
+      - name: Prepare Maven settings.xml for GitHub Packages
+        if: contains(steps.types.outputs.types, 'maven')
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.m2"
+          cat > "$HOME/.m2/settings.xml" <<SET
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${GH_OWNER}</username>
+                <password>${GH_PAT}</password>
+              </server>
+            </servers>
+          </settings>
+          SET
+
+      - name: Migrate Maven packages
+        if: contains(steps.types.outputs.types, 'maven')
+        run: |
+          set -euo pipefail
+          LIST='${{ steps.listpkgs.outputs.list }}'
+          maven_list="$(jq -c '[.[] | select(.package_type=="maven" and (.version!=null))]' <<< "${LIST}")"
+          count="$(jq 'length' <<< "${maven_list}")"
+          [ "${count}" -lt 1 ] && { echo "::notice::No Maven packages"; exit 0; }
+          if [ "${LIST_ONLY:-}" = "true" ]; then echo "::notice::LIST_ONLY=true (skip publish)"; exit 0; fi
+
+          for i in $(seq 0 $((count-1))); do
+            id="$(jq -r ".[$i].id"       <<< "${maven_list}")"
+            name="$(jq -r ".[$i].name"   <<< "${maven_list}")"   # e.g., com/example/my-lib
+            ver="$(jq -r  ".[$i].version"<<< "${maven_list}")"
+            artifact="$(basename "${name}")"
+
+            FILES="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
+            pom_id="$(jq -r '[.[] | select(.file_name|endswith(".pom"))][0].id' <<< "${FILES}")"
+            jar_id="$(jq -r '[.[] | select(.file_name|test("\\\\.(jar|war|aar)$"))][0].id' <<< "${FILES}")"
+
+            if [ -z "${pom_id}" ] || [ "${pom_id}" = "null" ]; then
+              echo "::warning::No POM for ${name}:${ver}"; continue
+            fi
+            TMPD="$(mktemp -d)"; cd "${TMPD}"
+            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -o "${artifact}-${ver}.pom" \
+              "${GL_URL%/}/-/package_files/${pom_id}/download"
+            if [ -n "${jar_id}" ] && [ "${jar_id}" != "null" ]; then
+              curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -o "${artifact}-${ver}.jar" \
+                "${GL_URL%/}/-/package_files/${jar_id}/download"
+            else
+              # If no binary, deploy POM-only
+              touch "${artifact}-${ver}.jar"
+            fi
+
+            DEST_REPO="${GH_OWNER}/${artifact}"
+            gh repo view "${DEST_REPO}" >/dev/null 2>&1 || gh repo create "${DEST_REPO}" --private -y >/dev/null
+
+            mvn -B deploy:deploy-file \
+              -Dfile="${artifact}-${ver}.jar" \
+              -DpomFile="${artifact}-${ver}.pom" \
+              -DrepositoryId=github \
+              -Durl="https://maven.pkg.github.com/${DEST_REPO}"
+
+            cd - >/dev/null
+          done
+
+      # ---------- NuGet ----------
+      - name: Migrate NuGet packages
+        if: contains(steps.types.outputs.types, 'nuget')
+        run: |
+          set -euo pipefail
+          LIST='${{ steps.listpkgs.outputs.list }}'
+          nupkg_list="$(jq -c '[.[] | select(.package_type=="nuget" and (.version!=null))]' <<< "${LIST}")"
+          count="$(jq 'length' <<< "${nupkg_list}")"
+          [ "${count}" -lt 1 ] && { echo "::notice::No NuGet packages"; exit 0; }
+          if [ "${LIST_ONLY:-}" = "true" ]; then echo "::notice::LIST_ONLY=true (skip publish)"; exit 0; fi
+
+          for i in $(seq 0 $((count-1))); do
+            id="$(jq -r ".[$i].id"       <<< "${nupkg_list}")"
+            name="$(jq -r ".[$i].name"   <<< "${nupkg_list}")"
+            ver="$(jq -r  ".[$i].version"<<< "${nupkg_list}")"
+
+            FILES="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
+            nupkg_id="$(jq -r '[.[] | select(.file_name|endswith(".nupkg"))][0].id' <<< "${FILES}")"
+            if [ -z "${nupkg_id}" ] || [ "${nupkg_id}" = "null" ]; then
+              echo "::warning::No .nupkg for ${name} ${ver}"; continue
+            fi
+
+            TMPD="$(mktemp -d)"; cd "${TMPD}"
+            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -O \
+              "${GL_URL%/}/-/package_files/${nupkg_id}/download"
+            PKG="$(ls *.nupkg | head -n1)"
+            echo "dotnet nuget push ${PKG} → GitHub"
+            dotnet nuget push "${PKG}" \
+              --api-key "${GH_PAT}" \
+              --source "https://nuget.pkg.github.com/${GH_OWNER}/index.json" \
+              --skip-duplicate
+            cd - >/dev/null
+          done
+
+      # ---------- RubyGems (optional) ----------
+      - name: Configure RubyGems (GitHub Packages)
+        if: contains(steps.types.outputs.types, 'rubygems')
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.gem"
+          printf -- "---\n:github: Bearer ${GH_PAT}\n" > "$HOME/.gem/credentials"
+          chmod 0600 "$HOME/.gem/credentials"
+
+      - name: Migrate RubyGems packages
+        if: contains(steps.types.outputs.types, 'rubygems')
+        run: |
+          set -euo pipefail
+          LIST='${{ steps.listpkgs.outputs.list }}'
+          gems_list="$(jq -c '[.[] | select(.package_type=="rubygems" and (.version!=null))]' <<< "${LIST}")"
+          count="$(jq 'length' <<< "${gems_list}")"
+          [ "${count}" -lt 1 ] && { echo "::notice::No RubyGems packages"; exit 0; }
+          if [ "${LIST_ONLY:-}" = "true" ]; then echo "::notice::LIST_ONLY=true (skip publish)"; exit 0; fi
+
+          for i in $(seq 0 $((count-1))); do
+            id="$(jq -r ".[$i].id"       <<< "${gems_list}")"
+            name="$(jq -r ".[$i].name"   <<< "${gems_list}")"
+            ver="$(jq -r  ".[$i].version"<<< "${gems_list}")"
+
+            FILES="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/projects/${GL_ENC}/packages/${id}/package_files")"
+            gem_id="$(jq -r '[.[] | select(.file_name|endswith(".gem"))][0].id' <<< "${FILES}")"
+            if [ -z "${gem_id}" ] || [ "${gem_id}" = "null" ]; then
+              echo "::warning::No .gem for ${name} ${ver}"; continue
+            fi
+
+            TMPD="$(mktemp -d)"; cd "${TMPD}"
+            curl -fsS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -L -O \
+              "${GL_URL%/}/-/package_files/${gem_id}/download"
+            GEM="$(ls *.gem | head -n1)"
+            gem push --key github --host "https://rubygems.pkg.github.com/${GH_OWNER}" "${GEM}"
+            cd - >/dev/null
+          done
