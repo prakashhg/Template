@@ -1881,7 +1881,7 @@ jobs:
             page="$next"
           done
           echo "list=${out}" >> "$GITHUB_OUTPUT"
-      - name: Fallback: enumerate container repositories (group scope) and filter to this project
+      - name: Fallback enumerate container repositories (group scope) and filter to this project
         id: repos_group
         if: ${{ steps.repos_project.outputs.list == '' || steps.repos_project.outputs.list == '[]' }}
         run: |
