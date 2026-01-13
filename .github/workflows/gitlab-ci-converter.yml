@@ -1881,8 +1881,7 @@ jobs:
             page="$next"
           done
           echo "list=${out}" >> "$GITHUB_OUTPUT"
-
-      - name: Fallback enumerate container repositories (group scope) and filter to this project
+      - name: Fallback: enumerate container repositories (group scope) and filter to this project
         id: repos_group
         if: ${{ steps.repos_project.outputs.list == '' || steps.repos_project.outputs.list == '[]' }}
         run: |
@@ -1994,5 +1993,67 @@ jobs:
               fi
             fi
 
+            idx=$((idx+1))
+          done
+
+      - name: Verify presence in GHCR (handles org vs user automatically)
+        if: ${{ steps.repos.outputs.list != '' && steps.repos.outputs.list != '[]' }}
+        env:
+          SRC_REG: ${{ steps.host.outputs.src }}
+          DST_REG: ${{ steps.host.outputs.dst }}
+        run: |
+          set -euo pipefail
+          repos='${{ steps.repos.outputs.list }}'
+          count=$(jq 'length' <<<"$repos")
+
+          # Helper: detect whether GH_OWNER is an organization or a user
+          is_org=0
+          if curl -s -H "Accept: application/vnd.github+json" \
+                  -H "Authorization: Bearer ${GH_PAT}" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  "https://api.github.com/orgs/${GH_OWNER}" \
+                  | jq -e '.login' >/dev/null 2>&1; then
+            is_org=1
+          fi
+
+          idx=0
+          while (( idx < count )); do
+            path=$(jq -r ".[$idx].path" <<<"$repos")     # e.g., group/project[/image]
+            dpath="$(echo "${GHCR_PREFIX:-}${path}" | tr 'A-Z' 'a-z')"
+            base="$(basename "$dpath")"
+
+            # List packages from the correct scope (org or user), type=container
+            if (( is_org == 1 )); then
+              PKGS=$(curl -s -H "Accept: application/vnd.github+json" \
+                           -H "Authorization: Bearer ${GH_PAT}" \
+                           -H "X-GitHub-Api-Version: 2022-11-28" \
+                           "https://api.github.com/orgs/${GH_OWNER}/packages?package_type=container")
+              pkg_url_prefix="https://github.com/orgs/${GH_OWNER}/packages/container"
+            else
+              PKGS=$(curl -s -H "Accept: application/vnd.github+json" \
+                           -H "Authorization: Bearer ${GH_PAT}" \
+                           -H "X-GitHub-Api-Version: 2022-11-28" \
+                           "https://api.github.com/users/${GH_OWNER}/packages?package_type=container")
+              pkg_url_prefix="https://github.com/users/${GH_OWNER}/packages?type=container"
+            fi
+
+            # Try to find a package name matching the tail of our path (common convention)
+            match=$(jq -r '.[] | select(.package_type=="container") | .name' <<<"$PKGS" \
+                        | grep -E "^${base}$" || true)
+            if [[ -n "$match" ]]; then
+              echo "::notice::GHCR package detected: ${pkg_url_prefix}/${match}"
+            else
+              echo "::warning::Not listed yet under ${is_org==1 && "org" || "user"} Packages for '${base}'."
+              echo "          Check visibility or query versions directly:"
+              if (( is_org == 1 )); then
+                echo "          curl -H 'Accept: application/vnd.github+json' -H 'Authorization: Bearer ${GH_PAT}' \\"
+                echo "               -H 'X-GitHub-Api-Version: 2022-11-28' \\"
+                echo "               https://api.github.com/orgs/${GH_OWNER}/packages/container/${base}/versions | jq '.[].metadata.container.tags'"
+              else
+                echo "          curl -H 'Accept: application/vnd.github+json' -H 'Authorization: Bearer ${GH_PAT}' \\"
+                echo "               -H 'X-GitHub-Api-Version: 2022-11-28' \\"
+                echo "               https://api.github.com/users/${GH_OWNER}/packages/container/${base}/versions | jq '.[].metadata.container.tags'"
+              fi
+            fi
             idx=$((idx+1))
           done
