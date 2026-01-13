@@ -1816,14 +1816,6 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-  packages: write
-
-concurrency:
-  group: gitlab-to-github-orchestrator
-  cancel-in-progress: false
-
 env:
   # ---- Read from GitHub environment/organization variables for consistency ----
   GL_URL: ${{ vars.GL_URL }}                # e.g., https://gitlab.com
