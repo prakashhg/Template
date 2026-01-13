@@ -15,7 +15,7 @@ on:
 
 permissions:
   contents: write
-  packages: write  # GHCR requires this for GITHUB_TOKEN pushes
+  packages: write  # GHCR needs this for GITHUB_TOKEN pushes
 
 env:
   # ---- REQUIRED ORG/ENDPOINTS ----
@@ -54,17 +54,15 @@ jobs:
         id: single
         run: |
           set -euo pipefail
-          if [[ -n "${{ github.event.inputs.only_project }}" ]]; then
-            pj="${{ github.event.inputs.only_project }}"
-            echo "project_list=[\"${pj}\"]" >> "$GITHUB_OUTPUT"
-            exit 0
+          pj="${{ github.event.inputs.only_project }}"
+          if [[ -n "${pj}" ]]; then
+            arr=$(jq -c -n --arg pj "${pj}" '[ $pj ]')
+            echo "project_list=${arr}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Discover projects under group (paginate; no empty items)
         if: steps.single.outputs.project_list == ''
         id: discover
-        env:
-          GL_API: ${{ env.GL_URL }} # placeholder
         run: |
           set -euo pipefail
           : "${GL_URL:?Set GL_URL in repo/org variables}"
@@ -101,13 +99,17 @@ jobs:
             jq -R . < "$tmp" | jq -s -c . | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Output matrix
+      - name: Output matrix (safe)
         id: out
         run: |
-          if [[ -n "${{ steps.single.outputs.project_list }}" ]]; then
-            echo "${{ steps.single.outputs.project_list }}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          single='${{ steps.single.outputs.project_list }}'
+          disc='${{ steps.discover.outputs.project_list }}'
+          if [[ -n "${single}" ]]; then
+            echo "${single}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
           else
-            echo "${{ steps.discover.outputs.project_list }}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
+            echo "${disc}" | sed 's/^/project_list=/' >> "$GITHUB_OUTPUT"
+          fi
 
   # 2) Mirror containers repo+tags to GHCR
   mirror_containers:
@@ -162,7 +164,7 @@ jobs:
           page=1
           while : ; do
             RESP=$(mktemp); HDR=$(mktemp)
-            # IMPORTANT: real ampersands (&), not HTML entities.
+            # IMPORTANT: real '&' characters (no HTML entities)
             url="${GL_API}/projects/${GL_ENC}/registry/repositories?tags=1&tags_count=true&per_page=100&page=${page}"
             http=$(curl -sS -w '%{http_code}' -o "$RESP" -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" "$url")
             [[ "$http" != "200" ]] && { echo "::warning::GitLab API HTTP $http for $url"; head -n 5 "$RESP"; break; }
