@@ -1,50 +1,46 @@
 
 name: Packages (GitLab → GitHub) · Group-wide migration
 
-on:
-  workflow_dispatch: {}
+on: [workflow_dispatch]
 
 permissions:
   contents: write
   packages: write
 
-# Load repo/org Variables via 'vars' to avoid env-context parse errors
 env:
   # GitLab
-  GL_URL:            ${{ vars.GL_URL }}            # e.g., https://gitlab.example.com
-  GL_GROUP:          ${{ vars.GL_GROUP }}          # e.g., acme/platform
+  GL_URL:  ${{ vars.GL_URL }}
+  GL_GROUP: ${{ vars.GL_GROUP }}
 
   # GitHub
-  GH_OWNER:          ${{ vars.GH_OWNER }}          # e.g., my-org
+  GH_OWNER: ${{ vars.GH_OWNER }}
 
   # Naming / mapping
-  NAME_SEPARATOR:    ${{ vars.GH_REPO_SEPARATOR }} # default '-'
-  NAME_PREFIX:       ${{ vars.GH_REPO_PREFIX }}    # optional
-  REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}    # "path" or "fullpath"
+  NAME_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+  NAME_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
+  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
 
   # Behavior
-  AUTO_CREATE_REPO:  ${{ vars.AUTO_CREATE_REPO }}  # "true"/"false" (for Maven dest repo)
+  AUTO_CREATE_REPO: ${{ vars.AUTO_CREATE_REPO }}
 
-  # (Optional) filters
-  INCLUDE_REGEX:     ${{ vars.INCLUDE_REGEX }}
-  EXCLUDE_REGEX:     ${{ vars.EXCLUDE_REGEX }}
+  # Filters
+  INCLUDE_REGEX: ${{ vars.INCLUDE_REGEX }}
+  EXCLUDE_REGEX: ${{ vars.EXCLUDE_REGEX }}
 
 jobs:
-  # 1) Discover all GitLab packages in the group (incl. subgroups)
   discover_packages:
     name: "1) Discover GitLab packages (group-wide)"
     runs-on: ubuntu-latest
     outputs:
       package_list: ${{ steps.collect.outputs.package_list }}
     env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }} # needs read_api (+ read_package_registry for some calls)
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
     steps:
       - name: Install jq & curl
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y jq curl
-
       - name: Collect packages via GitLab Packages API
         id: collect
         shell: bash
@@ -53,34 +49,23 @@ jobs:
           : "${GL_URL:?}"; : "${GL_GROUP:?}"
           GL_API="${GL_URL%/}/api/v4"
           GROUP_ENC=$(jq -rn --arg x "$GL_GROUP" '$x|@uri')
-
           page=1
           acc=()
           while :; do
             RESP=$(mktemp); HDR=$(mktemp)
             curl -sS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -D "$HDR" \
               "${GL_API}/groups/${GROUP_ENC}/packages?per_page=100&page=${page}" > "$RESP" || { echo "GitLab Packages API failed"; head -c 300 "$RESP" || true; exit 1; }
-
             while read -r row; do acc+=("$row"); done < <(jq -c '.[]' "$RESP")
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
             [[ -z "${next:-}" || "${next}" == "0" ]] && break
             page="$next"
           done
-
           inc="${INCLUDE_REGEX:-.*}"; exc="${EXCLUDE_REGEX:-^$}"
-          # Normalize and keep only needed fields
           json=$(printf '%s\n' "${acc[@]:-}" \
-            | jq -c --arg inc "$inc" --arg exc "$exc" '
-                select(. != null)
-                | select(.name|test($inc))
-                | select((.name|test($exc))|not)
-                | { id, name, version, package_type, project_id }
-              ' \
+            | jq -c --arg inc "$inc" --arg exc "$exc" 'select(. != null) | select(.name|test($inc)) | select((.name|test($exc))|not) | { id, name, version, package_type, project_id }' \
             | jq -s -c .)
-
           echo "package_list=${json}" >> "$GITHUB_OUTPUT"
 
-  # 2) Migrate NPM packages (ALL)
   npm_migration_all:
     name: "2) NPM migration · publish to GitHub npm registry (skip existing)"
     needs: discover_packages
@@ -93,7 +78,7 @@ jobs:
         pkg: ${{ fromJson(needs.discover_packages.outputs.package_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:   ${{ secrets.GH_PAT }}                # classic PAT with read:packages, write:packages
+      GH_PAT:   ${{ secrets.GH_PAT }}
     steps:
       - name: Filter: only npm packages
         id: gate
@@ -113,38 +98,32 @@ jobs:
           node-version: '20'
           registry-url: https://registry.npmjs.org
 
-      - name: Configure .npmrc for GitLab pull (pack) and GitHub publish
+      - name: Configure .npmrc for GitLab (pack) and GitHub (publish)
         if: steps.gate.outputs.continue == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p ~/.npm
-          # GitLab project-level endpoint (auth via token) – used to 'npm pack' tarballs
-          # See GL npm registry docs for endpoints & auth. 
           cat > .npmrc <<EOF
 //${GL_URL#*://}/api/v4/projects/${{ matrix.pkg.project_id }}/packages/npm/:_authToken=${GL_TOKEN}
 @*:registry=https://${GL_URL#*://}/api/v4/projects/${{ matrix.pkg.project_id }}/packages/npm/
 always-auth=true
 EOF
-          # GitHub npm registry auth (org-scope). Publishing uses GH_PAT (classic).
           echo "//npm.pkg.github.com/:_authToken=${GH_PAT}" >> .npmrc
 
-      - name: Compute package name/scope, version and target scope
+      - name: Compute package name/scope
         if: steps.gate.outputs.continue == 'true'
         id: meta
         run: |
           set -euo pipefail
           NAME=$(jq -r '.name'    <<< '${{ toJson(matrix.pkg) }}')
           VER=$(jq -r '.version'  <<< '${{ toJson(matrix.pkg) }}')
-          # npm names under GitLab are typically scoped (@group/pkg). We remap to the same scope on GitHub org.
-          SCOPE="${NAME%%/*}"   # e.g., @my-scope
-          BASE="${NAME##*/}"    # e.g., package-name
+          SCOPE="${NAME%%/*}"; BASE="${NAME##*/}"
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "scope=${SCOPE}" >> "$GITHUB_OUTPUT"
           echo "base=${BASE}"   >> "$GITHUB_OUTPUT"
 
-      - name: Skip if version exists in GitHub (gh api)
+      - name: Skip if version exists in GitHub
         if: steps.gate.outputs.continue == 'true'
         id: exists
         env:
@@ -155,21 +134,16 @@ EOF
           set -euo pipefail
           echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
           PKG_NAME="${SCOPE}/${BASE}"
-          # list versions for the npm package under org; if any match, skip
-          # Note: list org packages & grep by name (packages API supports listing & versions).
           DATA=$(gh api "/orgs/${GH_OWNER}/packages?package_type=npm&per_page=100")
           ID=$(echo "$DATA" | jq -r --arg n "$PKG_NAME" '.[] | select(.name==$n) | .id')
           if [[ -n "${ID:-}" ]]; then
             VERS=$(gh api "/orgs/${GH_OWNER}/packages/npm/${PKG_NAME}/versions?per_page=100" | jq -r '.[].name')
             if echo "$VERS" | grep -qx "$VERSION"; then
               echo "present=true" >> "$GITHUB_OUTPUT"
-              echo "Version ${VERSION} already exists in GitHub for ${PKG_NAME}"
               exit 0
             fi
           fi
           echo "present=false" >> "$GITHUB_OUTPUT"
-        # refs:
-        # - GitHub Packages REST endpoints for packages & versions (used with gh api)
 
       - name: Pack from GitLab and publish to GitHub
         if: steps.gate.outputs.continue == 'true' && steps.exists.outputs.present != 'true'
@@ -178,30 +152,26 @@ EOF
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          # Download the exact version tarball from GL by packing the remote package
           npm pack "${NAME}@${VERSION}"
           TARBALL=$(ls *.tgz | head -n1)
-          # Prepare a temp dir and re-publish to GitHub npm registry with the same version
           mkdir -p publish && tar -xzf "$TARBALL" -C publish --strip-components=1
           pushd publish >/dev/null
-          # Ensure the package.json has correct publish registry mapping for @scope
           npm publish --registry=https://npm.pkg.github.com/
           popd >/dev/null
 
-  # 3) Migrate Maven packages (ALL)
   maven_migration_all:
-    name: "3) Maven migration · deploy to GitHub Maven registry (repo-scoped, skip existing)"
+    name: "3) Maven migration · deploy to GitHub Maven registry (skip existing)"
     needs: discover_packages
     if: ${{ always() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       max-parallel: 3
-      matrix:
-        pkg: ${{ fromJson(needs.discover_packages.outputs.package_list) }}
+    matrix:
+      pkg: ${{ fromJson(needs.discover_packages.outputs.package_list) }}
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:   ${{ secrets.GH_PAT }}                 # classic PAT with read:packages, write:packages
+      GH_PAT:   ${{ secrets.GH_PAT }}
     steps:
       - name: Filter: only maven packages
         id: gate
@@ -219,7 +189,7 @@ EOF
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y openjdk-17-jdk maven jq curl
+          sudo apt-get install -y openjdk-17-jdk maven jq curl gh || true
           if ! command -v gh >/dev/null 2>&1; then
             curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
             | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
@@ -236,30 +206,16 @@ EOF
         id: meta
         run: |
           set -euo pipefail
-          NAME=$(jq -r '.name'    <<< '${{ toJson(matrix.pkg) }}')   # often like groupId/artifactId
+          NAME=$(jq -r '.name'    <<< '${{ toJson(matrix.pkg) }}')
           VER=$(jq -r '.version'  <<< '${{ toJson(matrix.pkg) }}')
-          GID="${NAME%/*}"
-          AID="${NAME##*/}"
-          # Destination GitHub repo name derived from GL project path (preserve structure)
-          # This satisfies Maven's repo-scoped permission model in GitHub Packages.
-          MODE="${REPO_NAME_MODE:-path}"
-          SEP="${NAME_SEPARATOR:-"-"}"
-          PREF="${NAME_PREFIX:-""}"
-
-          # Get project path from GL Packages API is not included; use project_id mapping:
-          # We reconstruct repo name from GitLab project path via API call (once).
+          GID="${NAME%/*}"; AID="${NAME##*/}"
+          MODE="${REPO_NAME_MODE:-path}"; SEP="${NAME_SEPARATOR:-"-"}"; PREF="${NAME_PREFIX:-""}"
           GL_API="${GL_URL%/}/api/v4"
           PINFO=$(mktemp)
-          curl -sS -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-            "${GL_API}/projects/${{ matrix.pkg.project_id }}" > "$PINFO"
+          curl -sS -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${{ matrix.pkg.project_id }}" > "$PINFO"
           PROJ_PATH=$(jq -r '.path_with_namespace' "$PINFO")
-          if [[ "$MODE" == "fullpath" ]]; then
-            BASE=$(echo -n "$PROJ_PATH" | tr '/' "$SEP")
-          else
-            BASE="${PROJ_PATH##*/}"
-          fi
+          if [[ "$MODE" == "fullpath" ]]; then BASE=$(echo -n "$PROJ_PATH" | tr '/' "$SEP"); else BASE="${PROJ_PATH##*/}"; fi
           GH_REPO="${PREF}${BASE}"
-
           echo "groupId=${GID}"   >> "$GITHUB_OUTPUT"
           echo "artifactId=${AID}" >> "$GITHUB_OUTPUT"
           echo "version=${VER}"    >> "$GITHUB_OUTPUT"
@@ -276,10 +232,9 @@ EOF
             echo "Repo ${GH_OWNER}/${GH_REPO} exists."
           else
             gh repo create "${GH_OWNER}/${GH_REPO}" --private --confirm
-            echo "Created repo ${GH_OWNER}/${GH_REPO}"
           fi
 
-      - name: Skip if version exists in GitHub (gh api)
+      - name: Skip if version exists in GitHub
         if: steps.gate.outputs.continue == 'true'
         id: exists
         env:
@@ -289,23 +244,19 @@ EOF
         run: |
           set -euo pipefail
           echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
-          # GitHub Packages (Maven) is repo-scoped; the package appears under the repo.
-          # Check for package & version; skip publish if already present.
           PKG_NAME="${NAME}"
-          # Find the package by name
           DATA=$(gh api "/repos/${GH_OWNER}/${GH_REPO}/packages?package_type=maven&per_page=100")
           ID=$(echo "$DATA" | jq -r --arg n "$PKG_NAME" '.[] | select(.name==$n) | .id')
           if [[ -n "${ID:-}" ]]; then
             VERS=$(gh api "/repos/${GH_OWNER}/${GH_REPO}/packages/maven/${PKG_NAME}/versions?per_page=100" | jq -r '.[].name')
             if echo "$VERS" | grep -qx "$VERSION"; then
               echo "present=true" >> "$GITHUB_OUTPUT"
-              echo "Version ${VERSION} already exists in GitHub for ${PKG_NAME}"
               exit 0
             fi
           fi
           echo "present=false" >> "$GITHUB_OUTPUT"
 
-      - name: Create Maven settings.xml for GitLab (download) and GitHub (deploy)
+      - name: Create Maven settings.xml
         if: steps.gate.outputs.continue == 'true' && steps.exists.outputs.present != 'true'
         run: |
           set -euo pipefail
@@ -313,13 +264,11 @@ EOF
           cat > ~/.m2/settings.xml <<'EOS'
           <settings>
             <servers>
-              <!-- GitHub Packages repo-scoped auth -->
               <server>
                 <id>github</id>
                 <username>${env.GH_OWNER}</username>
                 <password>${env.GH_PAT}</password>
               </server>
-              <!-- GitLab access via Private-Token header (HTTP header auth) -->
               <server>
                 <id>gitlab</id>
                 <configuration>
@@ -344,20 +293,13 @@ EOF
           GH_REPO: ${{ steps.meta.outputs.gh_repo }}
         run: |
           set -euo pipefail
-          # Prepare coords and repos
           GL_MVN="https://${GL_URL#*://}/api/v4/projects/${{ matrix.pkg.project_id }}/packages/maven"
           GH_MVN="https://maven.pkg.github.com/${GH_OWNER}/${GH_REPO}"
-
-          # Try to resolve artifact from GitLab (download to local repo)
           mvn -B dependency:get \
             -DremoteRepositories=gitlab::default::${GL_MVN} \
             -DgroupId="${GID}" -DartifactId="${AID}" -Dversion="${VER}" -Dtransitive=false -s ~/.m2/settings.xml
-
-          # Figure out local path of downloaded artifact
           FILE_JAR=$(find ~/.m2/repository -path "*/$(echo ${GID} | tr '.' '/')/${AID}/${VER}/${AID}-${VER}.jar" -print -quit || true)
           FILE_POM=$(find ~/.m2/repository -path "*/$(echo ${GID} | tr '.' '/')/${AID}/${VER}/${AID}-${VER}.pom" -print -quit || true)
-
-          # Deploy file(s) to GH Packages (repo-scoped)
           if [[ -f "${FILE_POM}" ]]; then
             mvn -B deploy:deploy-file \
               -Durl="${GH_MVN}" -DrepositoryId=github \
