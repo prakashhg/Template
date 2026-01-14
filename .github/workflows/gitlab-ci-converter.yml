@@ -1,11 +1,13 @@
 
-name: Packages (GitLab → GitHub) · Group-wide migration
+name: Mirroring (GitLab → GitHub) + Trackers migration [Group-wide]
 
-on: [workflow_dispatch]
+on: [workflow_dispatch, push, delete]
 
 permissions:
   contents: write
-  packages: write
+  issues: write
+  pull-requests: write
+
 
 env:
   # GitLab
