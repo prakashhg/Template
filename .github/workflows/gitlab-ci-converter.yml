@@ -32,31 +32,52 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      - name: Collect & filter projects under GL_GROUP (exclude deletion-scheduled)
+      - name: Collect & filter projects under GL_GROUP (robust)
         id: collect
         shell: bash
         run: |
           set -euo pipefail
           : "${GL_URL:?GL_URL is required}"
           : "${GL_GROUP:?GL_GROUP is required}"
+      
           GL_API="${GL_URL%/}/api/v4"
           GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')
-
+      
           REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
           GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
           SEP="${GH_REPO_SEPARATOR:-"-"}"
-
+      
           page=1
           filtered=()
+      
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" > "${RESP}"
-
+      
+            # Capture HTTP code explicitly
+            HTTP=$(curl -sS -D "${HDR}" -w '%{http_code}' \
+              -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" \
+              -o "${RESP}")
+      
+            if [[ "${HTTP}" != "200" ]]; then
+              echo "::error::GitLab API returned HTTP ${HTTP} for groups/${GL_GROUP}/projects"
+              echo "Response (truncated):"
+              head -c 500 "${RESP}" || true
+              exit 1
+            fi
+      
+            TYPE=$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")
+            if [[ "${TYPE}" != "array" ]]; then
+              echo "::error::Expected array of projects but got type='${TYPE}'. Raw (truncated):"
+              head -c 500 "${RESP}" || true
+              exit 1
+            fi
+      
+            # Iterate safely; keep variables in current shell (no pipe subshell)
             while read -r proj; do
-              path=$(jq -r '.path_with_namespace' <<<"${proj}")
+              path=$(jq -r '.path_with_namespace // empty' <<<"${proj}")
               [[ -z "${path}" ]] && continue
-
+      
               # Compute destination repo name
               if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
                 base="$(echo "${path}" | tr '/' "${SEP}")"
@@ -64,7 +85,7 @@ jobs:
                 base="${path##*/}"
               fi
               dest="${GH_REPO_PREFIX}${base}"
-
+      
               # Exclude deletion-scheduled repos by name pattern
               if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
                 echo "Exclude (deletion-scheduled): ${dest} (from GL: ${path})"
@@ -72,14 +93,15 @@ jobs:
                 filtered+=("${path}")
               fi
             done < <(jq -c '.[]' "${RESP}")
-
+      
             next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
             [[ -z "${next:-}" || "${next}" == "0" ]] && break
             page="${next}"
           done
-
+      
           json=$(printf '%s\n' "${filtered[@]:-}" | jq -R . | jq -s -c .)
           echo "project_list=${json}" >> "$GITHUB_OUTPUT"
+      
 
   # 2) Repo Migration · 1.1 Commit Sync — ALL projects
   repo_migration_commit_sync_all:
