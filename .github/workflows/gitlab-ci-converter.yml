@@ -1805,6 +1805,14 @@ jobs:
           printf "Migrated %s variable(s) to %s\n" \
             "$(jq 'length' vars-report.json)" "${REPO_SLUG}"
 
+      - name: Upload migration report (no values)
+        if: steps.vars.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vars-migration-${{ steps.repo.outputs.gh_repo }}
+          path: vars-report.json
+          compression-level: 6
+
   package_registry_migration_ghcr_all:
     name: "10) Package Registry · Container images (GitLab → GHCR) (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]  # relies on your existing jobs
@@ -2055,3 +2063,4 @@ jobs:
         if: always()
         run: |
           echo "Container image migration job finished for ${{ matrix.project }} (GL -> GHCR)."
+
