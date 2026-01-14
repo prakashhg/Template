@@ -80,7 +80,7 @@ jobs:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
       GH_PAT:   ${{ secrets.GH_PAT }}
     steps:
-      - name: Filter: only npm packages
+      - name: Filter only npm packages
         id: gate
         run: |
           set -euo pipefail
