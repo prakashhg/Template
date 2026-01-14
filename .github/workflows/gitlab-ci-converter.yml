@@ -8,27 +8,32 @@ permissions:
   contents: read
   packages: write
 
+# Load repo/org variables into env (use 'vars.*' here, not 'env.*')
 env:
-  # ---- Required context (same style as your repo migration workflow) ----
-  GL_URL: ${{ vars.GL_URL }}                  # e.g., https://gitlab.example.com
-  GL_GROUP: ${{ vars.GL_GROUP }}              # e.g., my-group/subgroup
-  GH_OWNER: ${{ vars.GH_OWNER }}              # e.g., my-org
-  # Preserve structure: turn "group/subgroup/proj[/path]" into "prefix + group-sep-subgroup-sep-proj[-sep-path]"
-  GHCR_REPO_PREFIX: ${{ vars.GHCR_REPO_PREFIX }}      # optional, e.g., "" or "gl-"
-  GHCR_REPO_SEPARATOR: ${{ vars.GHCR_REPO_SEPARATOR }} # default "-" if empty
-  # Optional filters for mirroring containers
-  INCLUDE_REGEX: ${{ vars.INCLUDE_REGEX }}    # e.g., ".*"
-  EXCLUDE_REGEX: ${{ vars.EXCLUDE_REGEX }}    # e.g., "^$"
+  # ---- Source (GitLab) ----
+  GL_URL:   ${{ vars.GL_URL }}      # e.g., https://gitlab.example.com
+  GL_GROUP: ${{ vars.GL_GROUP }}    # e.g., my-group/subgroup
+
+  # ---- Destination (GitHub) ----
+  GH_OWNER: ${{ vars.GH_OWNER }}    # e.g., my-org
+
+  # ---- Naming controls for GHCR repo naming ----
+  GHCR_REPO_PREFIX:   ${{ vars.GHCR_REPO_PREFIX }}      # optional, e.g., "gl-"
+  GHCR_REPO_SEPARATOR: ${{ vars.GHCR_REPO_SEPARATOR }}  # default "-" if empty
+
+  # ---- Discovery filters (optional) ----
+  INCLUDE_REGEX: ${{ vars.INCLUDE_REGEX }}  # default ".*"
+  EXCLUDE_REGEX: ${{ vars.EXCLUDE_REGEX }}  # default "^$"
 
 jobs:
-  # 1) Discover GitLab container repositories across the GL_GROUP (includes subgroups)
+  # 1) Discover all container repositories in the GitLab group (includes subgroups)
   discover_container_repos:
     name: "1) Discover GitLab Container Registry repos (group-wide)"
     runs-on: ubuntu-latest
     outputs:
       repo_list: ${{ steps.collect.outputs.repo_list }}
     env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}   # needs read_registry + api
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}   # PAT or deploy token with read_api + read_registry
     steps:
       - name: Install jq & curl
         run: |
@@ -36,26 +41,24 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      - name: Collect GitLab container repos (with optional tags count)
+      - name: Collect GL container repos (group + subgroups)
         id: collect
         shell: bash
         run: |
           set -euo pipefail
           : "${GL_URL:?GL_URL required}"; : "${GL_GROUP:?GL_GROUP required}"
           GL_API="${GL_URL%/}/api/v4"
-          # Encode group path safely
           GROUP_ENC=$(jq -rn --arg x "$GL_GROUP" '$x|@uri')
-
           page=1
           acc=()
+
           while :; do
             RESP=$(mktemp); HDR=$(mktemp)
-            # Group-level registry listing includes subgroups; tags_count=1 helps priority decisions
+            # Group-level registry listing (includes subgroups); tags_count gives quick insight
             curl -sS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -D "$HDR" \
               "${GL_API}/groups/${GROUP_ENC}/registry/repositories?per_page=100&page=${page}&tags_count=true" >"$RESP" \
               || { echo "ERROR: GitLab Container Registry API failed"; head -c 300 "$RESP" || true; exit 1; }
 
-            # Each item has .path (group/project[/extra]), .location (registry host path), .project_id, etc.
             while read -r row; do
               acc+=("$row")
             done < <(jq -c '.[]' "$RESP")
@@ -65,17 +68,17 @@ jobs:
             page="$next"
           done
 
-          # Optional filtering by INCLUDE/EXCLUDE regex
           inc="${INCLUDE_REGEX:-.*}"; exc="${EXCLUDE_REGEX:-^$}"
           json=$(printf '%s\n' "${acc[@]:-}" | jq -c 'select(. != null)' | jq -s -c --arg inc "$inc" --arg exc "$exc" '
             [ .[]
               | select(.path|test($inc))
               | select((.path|test($exc))|not)
+              | { id, project_id, path, location, tags_count }
             ]')
 
           echo "repo_list=${json}" >> "$GITHUB_OUTPUT"
 
-  # 2) Mirror all tags for every discovered container repo to GHCR (no deletions)
+  # 2) Mirror ALL tags for each discovered repository using skopeo copy --all
   mirror_containers_all:
     name: "2) Mirror containers to GHCR (ALL repos/tags)"
     needs: discover_container_repos
@@ -86,10 +89,10 @@ jobs:
       matrix:
         repo: ${{ fromJson(needs.discover_container_repos.outputs.repo_list) }}
     env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }} # read_registry
-      GH_PAT:   ${{ secrets.GH_PAT }}       # classic PAT: write:packages + read:packages
+      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}   # read_api + read_registry
+      GH_PAT:   ${{ secrets.GH_PAT }}         # classic PAT: write:packages (+ read:packages)
     steps:
-      - name: Install skopeo + gh + jq
+      - name: Install skopeo + gh + jq + curl
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -103,8 +106,9 @@ jobs:
             sudo apt-get update -y && sudo apt-get install -y gh
           fi
           gh --version
+          skopeo --version
 
-      - name: Authenticate to GitHub CLI & GHCR
+      - name: Authenticate to GitHub (gh) & GHCR
         run: |
           set -euo pipefail
           echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
@@ -116,56 +120,87 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # For GitLab registry, user can be your GL username or any string; PAT must include read_registry
-          # Exact hostname used by container registry equals GL_URL host (often same host, possibly +port)
           host="${GL_URL#*://}"
+          # For GL registry login, user can be any placeholder (oauth2/gitlab-ci-token); token provides access
           echo "${GL_TOKEN}" | skopeo login "${host}" -u oauth2 --password-stdin
         env:
           GL_URL: ${{ env.GL_URL }}
 
-      - name: Compute source and destination refs (preserve structure)
+      - name: Compute repo refs (src/dest + dest name mapping)
         id: refs
         shell: bash
         env:
-          GHCR_REPO_PREFIX: ${{ env.GHCR_REPO_PREFIX }}
+          GHCR_REPO_PREFIX:   ${{ env.GHCR_REPO_PREFIX }}
           GHCR_REPO_SEPARATOR: ${{ env.GHCR_REPO_SEPARATOR }}
-          GH_OWNER: ${{ env.GH_OWNER }}
+          GH_OWNER:           ${{ env.GH_OWNER }}
+          GL_URL:             ${{ env.GL_URL }}
         run: |
           set -euo pipefail
-          src_path=$(jq -r '.path' <<< '${{ toJson(matrix.repo) }}')          # e.g., group/proj[/path]
+          src_path=$(jq -r '.path' <<< '${{ toJson(matrix.repo) }}')     # e.g., group/proj[/path]
           host="${GL_URL#*://}"
-          src="docker://${host}/${src_path}"                                   # repo scope (no tag)
+          SRC_REPO="docker://${host}/${src_path}"                         # repository scope
           sep="${GHCR_REPO_SEPARATOR:-"-"}"
           pref="${GHCR_REPO_PREFIX:-""}"
-          # Turn "group/subgroup/proj/path" -> "pref + group-sep-subgroup-sep-proj-sep-path"
           base=$(echo -n "${src_path}" | tr '/' "${sep}")
-          dest="docker://ghcr.io/${GH_OWNER}/${pref}${base}"
-          echo "src=${src}"   >> "$GITHUB_OUTPUT"
-          echo "dest=${dest}" >> "$GITHUB_OUTPUT"
+          DEST_REPO="docker://ghcr.io/${GH_OWNER}/${pref}${base}"
+          echo "src=${SRC_REPO}"   >> "$GITHUB_OUTPUT"
+          echo "dest=${DEST_REPO}" >> "$GITHUB_OUTPUT"
+          echo "src_path=${src_path}" >> "$GITHUB_OUTPUT"
 
-      - name: Mirror ALL tags & multi-arch manifests with skopeo (no deletes)
+      - name: Enumerate tags from GitLab (per repository)
+        id: tags
+        shell: bash
+        env:
+          GL_URL: ${{ env.GL_URL }}
+          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          repo_id=$(jq -r '.id' <<< '${{ toJson(matrix.repo) }}')
+          page=1
+          tags=()
+          while :; do
+            RESP=$(mktemp); HDR=$(mktemp)
+            curl -sS -H "PRIVATE-TOKEN: ${GL_TOKEN}" -D "$HDR" \
+              "${GL_API}/projects/${{ matrix.repo.project_id }}/registry/repositories/${repo_id}/tags?per_page=100&page=${page}" > "$RESP" \
+              || { echo "ERROR: GL tags API"; head -c 300 "$RESP" || true; exit 1; }
+            while read -r t; do tags+=("$t"); done < <(jq -r '.[].name' "$RESP")
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
+            page="$next"
+          done
+          if [[ ${#tags[@]} -eq 0 ]]; then
+            echo "list=[]" >> "$GITHUB_OUTPUT"
+            echo "No tags found; skipping."
+          else
+            printf '%s\n' "${tags[@]}" | jq -R . | jq -s -c . | sed 's/^/list=/' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Copy all tags (manifest lists preserved) to GHCR
+        if: steps.tags.outputs.list != '[]' && steps.tags.outputs.list != ''
         shell: bash
         run: |
           set -euo pipefail
           src="${{ steps.refs.outputs.src }}"
           dest="${{ steps.refs.outputs.dest }}"
-          echo "Copying: ${src}  -->  ${dest}"
-          # Sync the repository scope (copies all tags). `--all` preserves multi-arch manifest lists.
-          # If the registry implementation requires explicit tags, you can loop over tags; for GitLab & GHCR
-          # skopeo sync of the repo scope works well.
-          skopeo sync --src docker --dest docker --all "${src}" "${dest%/*}"
-          echo "Mirror completed for ${src}"
-        # About skopeo copy/sync & --all: copy OCI images (including manifest lists) between registries. 
-        # (Docs: containers/skopeo + man page)  ← (citations below)
+          echo "Copying tags from ${src} -> ${dest}"
+          mapfile -t TAGS < <(jq -r '.[]' <<< '${{ steps.tags.outputs.list }}')
+          for tag in "${TAGS[@]}"; do
+            echo "::group::Copy $tag"
+            skopeo copy --all "${src}:${tag}" "${dest}:${tag}"
+            echo "::endgroup::"
+            # small throttle to be nice
+            sleep 0.3
+          done
+          echo "Completed: ${{ steps.refs.outputs.src_path }}"
 
-      - name: Verify on GitHub via gh api (package metadata)
+      - name: Verify package presence in GHCR via gh api
         shell: bash
         run: |
           set -euo pipefail
-          # List (up to 100) container packages in the org and print the ones matching our new repo name
           base=$(jq -r '.path' <<< '${{ toJson(matrix.repo) }}' | tr '/' "${GHCR_REPO_SEPARATOR:-"-"}")
           candidate="${GHCR_REPO_PREFIX:-""}${base}"
-          echo "::group::GH Packages that look like ${candidate}"
+          echo "::group::Packages that match '${candidate}'"
           gh api -H "Accept: application/vnd.github+json" \
             "/orgs/${GH_OWNER}/packages?package_type=container&per_page=100" \
             | jq -r --arg name "$candidate" '.[] | select(.name|test($name)) | {name, package_type, visibility}'
@@ -173,23 +208,22 @@ jobs:
         env:
           GH_OWNER: ${{ env.GH_OWNER }}
 
-  # 3) (Optional) Report non-container packages discovered via GitLab Packages API (npm, Maven, NuGet, PyPI, ...)
+  # 3) Report non-container packages (npm/maven/nuget/pypi…) found in the GitLab group
   discover_non_container_packages:
-    name: "3) Report non-container packages present in GitLab Packages API"
+    name: "3) Report non-container packages (not container registry)"
     runs-on: ubuntu-latest
-    needs: discover_container_repos
     env:
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GL_URL: ${{ env.GL_URL }}
-      GL_GROUP: ${{ env.GL_GROUP }}
     steps:
       - name: Install jq & curl
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq curl
-      - name: List group packages (excluding container registry)
+
+      - name: List group packages (Packages API)
         run: |
           set -euo pipefail
+          : "${GL_URL:?}"; : "${GL_GROUP:?}"
           GL_API="${GL_URL%/}/api/v4"
           GROUP_ENC=$(jq -rn --arg x "$GL_GROUP" '$x|@uri')
           page=1; acc=()
@@ -204,7 +238,7 @@ jobs:
           done
           printf '%s\n' "${acc[@]:-}" | jq -s '
             [ .[]
-              | select(.package_type != "container") # Packages API covers maven/npm/pypi/nuget/etc.
+              | select(.package_type != "container")
               | {id, name, version, package_type, project_id}
             ]' > non_container_packages.json
       - name: Upload report
