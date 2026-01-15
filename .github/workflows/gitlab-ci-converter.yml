@@ -17,18 +17,18 @@ permissions:
 
 env:
   # Required
-  GL_URL: ${{ vars.GL_URL }}              # e.g. https://gitlab.com
-  GL_GROUP: ${{ vars.GL_GROUP }}          # GitLab top-level group path
-  GH_OWNER: ${{ vars.GH_OWNER }}          # GitHub org/user
+  GL_URL: ${{ vars.GL_URL }}
+  GL_GROUP: ${{ vars.GL_GROUP }}
+  GH_OWNER: ${{ vars.GH_OWNER }}
 
   # Optional behavior controls
-  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}          # "path" (default) or "fullpath"
-  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}          # e.g. "gl-"
-  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}    # used when REPO_NAME_MODE=fullpath (default "-")
-  GL_REGISTRY: ${{ vars.GL_REGISTRY }}                # optional GitLab registry override
-  GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}              # npm scope (owner/org) without "@"
+  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
+  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
+  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+  GL_REGISTRY: ${{ vars.GL_REGISTRY }}
+  GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}
 
-  # Curl hardening (no headers here to avoid word-splitting)
+  # Curl hardening (NO headers here)
   CURL_FLAGS: --http1.1 --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
 
 jobs:
@@ -653,16 +653,14 @@ jobs:
               # Link to repo so it appears under that repo's "Packages"
               repo_url="https://github.com/${GH_OWNER}/${GH_REPO}.git"
 
+              # ---- FIX: set repository as an object unconditionally (no merge/if) ----
               jq --arg newname "${newname}" \
                  --arg repo "${repo_url}" \
                  '
                    .name = $newname
                    | .publishConfig = (.publishConfig // {})
                    | .publishConfig.registry = "https://npm.pkg.github.com"
-                   | .repository = (
-                       if .repository == null then { "type":"git","url": $repo }
-                       else .repository + { "type":"git","url": $repo }
-                     )
+                   | .repository = { "type": "git", "url": $repo }
                  ' "${pkg}" > "${pkg}.new"
               mv "${pkg}.new" "${pkg}"
 
