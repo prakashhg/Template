@@ -24,7 +24,6 @@ env:
   GH_REPO_PREFIX:       ${{ vars.GH_REPO_PREFIX }}      # optional e.g. "gl-"
   GH_REPO_SEPARATOR:    ${{ vars.GH_REPO_SEPARATOR }}   # used when REPO_NAME_MODE=fullpath (default "-")
   GL_REGISTRY:          ${{ vars.GL_REGISTRY }}         # optional override of GitLab registry domain
-  MAKE_PUBLIC:          ${{ vars.MAKE_PUBLIC }}         # optional "true"/"false" for final visibility
 
 jobs:
   # 1) Discover all projects under the GitLab group (including subgroups)
@@ -132,8 +131,7 @@ jobs:
         project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
 
     env:
-      DRY_RUN:     ${{ github.event.inputs.dry_run }}
-      MAKE_PUBLIC: ${{ env.MAKE_PUBLIC }}
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
 
     steps:
       - name: Install jq, curl, gh, skopeo
@@ -187,7 +185,7 @@ jobs:
         shell: bash
         env:
           GL_URL:      ${{ env.GL_URL }}
-          GL_PROJECT:  ${{ matrix.project }} # <-- space after colon fixed
+          GL_PROJECT:  ${{ matrix.project }}
           GL_TOKEN:    ${{ secrets.GITLAB_TOKEN }}
           GL_REGISTRY: ${{ env.GL_REGISTRY }}
         run: |
@@ -392,28 +390,6 @@ jobs:
           else
             echo "No package names captured (copy found no tags or DRY_RUN=true)."
           fi
-
-      - name: (Optional) Make GHCR packages public
-        if: ${{ env.MAKE_PUBLIC == 'true' }}
-        shell: bash
-        env:
-          PKG_NAMES: ${{ steps.copy.outputs.pkg_names }}
-          GH_OWNER:  ${{ env.GH_OWNER }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${PKG_NAMES:-}" || "${PKG_NAMES}" == "[]" ]]; then
-            echo "No packages to flip visibility for."
-            exit 0
-          fi
-          mapfile -t names < <(jq -r '.[]' <<< "${PKG_NAMES}")
-          for n in "${names[@]}"; do
-            echo "Setting visibility=public for container package: ${n}"
-            if ! gh api -X PATCH -H "Accept: application/vnd.github+json" \
-              "/orgs/${GH_OWNER}/packages/container/${n}/visibility" \
-              -f visibility=public; then
-              echo "::warning::Failed to set visibility for ${n}"
-            fi
-          done
 
       - name: Summary
         if: always()
