@@ -547,4 +547,3 @@ jobs:
       - name: Summary (npm)
         if: always()
         run: echo "npm package migration finished for ${{ matrix.project }}"
-``
