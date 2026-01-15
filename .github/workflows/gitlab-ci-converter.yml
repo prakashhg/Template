@@ -16,7 +16,7 @@ permissions:
   packages: write
 
 env:
-  # Repo variables expected to be defined in Settings ▸ Variables
+  # Expected repo variables (Settings ▸ Secrets and variables ▸ Actions ▸ Variables)
   GL_URL: ${{ vars.GL_URL }}
   GL_GROUP: ${{ vars.GL_GROUP }}
   GH_OWNER: ${{ vars.GH_OWNER }}
@@ -51,7 +51,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      - name: Collect & filter projects under GL_GROUP (robust)
+      - name: Collect & filter projects under GL_GROUP (recursive)
         id: collect
         shell: bash
         env:
@@ -88,7 +88,7 @@ jobs:
               path=$(jq -r '.path_with_namespace // empty' <<<"${proj}")
               [[ -z "${path}" ]] && continue
 
-              # Compute destination GH repo name
+              # Compute destination GH repo name to allow pre-filtering rules if needed
               if [[ "${MODE}" == "fullpath" ]]; then
                 base="$(echo "${path}" | tr '/' "${SEP}")"
               else
@@ -96,7 +96,7 @@ jobs:
               fi
               dest="${PREF}${base}"
 
-              # (optional) example exclude rule by name pattern
+              # Example exclude rule by name pattern
               if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
                 echo "Exclude (deletion-scheduled): ${dest} (from GL: ${path})"
               else
@@ -181,6 +181,7 @@ jobs:
           GL_URL:    ${{ env.GL_URL }}
           GL_PROJECT:${{ matrix.project }}
           GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}
+          GL_REGISTRY: ${{ env.GL_REGISTRY }}
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
@@ -261,6 +262,7 @@ jobs:
           GH_OWNER:  ${{ env.GH_OWNER }}
           GH_REPO:   ${{ steps.repo.outputs.gh_repo }}
           DRY_RUN:   ${{ env.DRY_RUN }}
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
           json="${REPO_LIST}"
@@ -312,10 +314,10 @@ jobs:
               continue
             fi
 
-            # Preserve suffix beyond project root
-            suffix="${reg_path#${{ matrix.project }}}"
+            # Preserve suffix beyond project root (pure Bash)
+            suffix="${reg_path#${GL_PROJECT}}"
             if [[ "${suffix}" == "${reg_path}" ]]; then
-              proj_name="${{ matrix.project ##*/ }}"
+              proj_name="${GL_PROJECT##*/}"
               suffix="/${reg_path#*${proj_name}}"
             fi
             suffix="${suffix#/}"
@@ -379,7 +381,7 @@ jobs:
               skopeo list-tags "docker://ghcr.io/${GH_OWNER}/${n}" || true
             done
           else
-            echo "No package names captured (copy may have found no tags or DRY_RUN=true)."
+            echo "No package names captured (copy found no tags or DRY_RUN=true)."
           fi
 
       - name: (Optional) Make GHCR packages public
