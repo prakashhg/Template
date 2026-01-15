@@ -29,15 +29,8 @@ env:
   GL_REGISTRY: ${{ vars.GL_REGISTRY }}                # optional override for GitLab registry domain
   GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}              # for npm migration: GitHub scope (org/user) without "@"
 
-  # Hardened curl flags used everywhere we talk to GitLab APIs
-  CURL_FLAGS: >-
-    --http1.1
-    --retry 5
-    --retry-all-errors
-    --connect-timeout 15
-    --max-time 120
-    -H "Accept: application/json"
-    -H "Connection: close"
+  # Hardened curl flags used everywhere we talk to GitLab APIs (NO headers here)
+  CURL_FLAGS: --http1.1 --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
 
 jobs:
   discover_projects:
@@ -93,6 +86,8 @@ jobs:
             CURL_RC=0
             HTTP=$(curl -sS ${CURL_FLAGS} \
                 -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                -H "Accept: application/json" \
+                -H "Connection: close" \
                 -D "${HDR}" -w '%{http_code}' \
                 "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" \
                 -o "${RESP}") || CURL_RC=$?
@@ -101,6 +96,8 @@ jobs:
               echo "::warning::curl failed (rc=${CURL_RC}) while listing group projects; retrying once..."
               HTTP=$(curl -sS ${CURL_FLAGS} \
                   -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                  -H "Accept: application/json" \
+                  -H "Connection: close" \
                   -D "${HDR}" -w '%{http_code}' \
                   "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" \
                   -o "${RESP}") || { echo "::error::Final retry failed"; exit 1; }
@@ -210,6 +207,7 @@ jobs:
           GL_PROJECT: ${{ matrix.project }}
           GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
           GL_REGISTRY: ${{ env.GL_REGISTRY }}
+          CURL_FLAGS: ${{ env.CURL_FLAGS }}
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
@@ -230,7 +228,11 @@ jobs:
           fi
 
           # Resolve GitLab username for skopeo logins
-          GL_USER="$(curl -s ${CURL_FLAGS} -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/user" | jq -r '.username // empty')"
+          GL_USER="$(curl -s ${CURL_FLAGS} \
+                      -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                      -H "Accept: application/json" \
+                      -H "Connection: close" \
+                      "${GL_API}/user" | jq -r '.username // empty')"
           [[ -z "${GL_USER}" || "${GL_USER}" == "null" ]] && GL_USER="oauth2"
 
           {
@@ -267,6 +269,8 @@ jobs:
             CURL_RC=0
             HTTP=$(curl -sS ${CURL_FLAGS} \
                 -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                -H "Accept: application/json" \
+                -H "Connection: close" \
                 -D "${HDR}" -w '%{http_code}' \
                 "${GL_API}/projects/${GL_ENC}/registry/repositories?per_page=100&page=${page}" \
                 -o "${RESP}") || CURL_RC=$?
@@ -275,6 +279,8 @@ jobs:
               echo "::warning::curl failed (rc=${CURL_RC}) fetching container repositories; retrying once..."
               HTTP=$(curl -sS ${CURL_FLAGS} \
                   -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                  -H "Accept: application/json" \
+                  -H "Connection: close" \
                   -D "${HDR}" -w '%{http_code}' \
                   "${GL_API}/projects/${GL_ENC}/registry/repositories?per_page=100&page=${page}" \
                   -o "${RESP}") || { echo "::notice::Final retry failed"; break; }
@@ -347,6 +353,8 @@ jobs:
               RESP="$(mktemp)"; HDR="$(mktemp)"
               if ! curl --fail-with-body -s ${CURL_FLAGS} \
                    -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                   -H "Accept: application/json" \
+                   -H "Connection: close" \
                    -D "${HDR}" \
                    "${GL_URL%/}/api/v4/projects/${GL_ENC}/registry/repositories/${repo_id}/tags?per_page=100&page=${page}" \
                    > "${RESP}"; then
@@ -490,6 +498,8 @@ jobs:
           RESP="$(mktemp)"; CURL_RC=0
           HTTP=$(curl -sS ${CURL_FLAGS} \
               -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+              -H "Accept: application/json" \
+              -H "Connection: close" \
               -w '%{http_code}' \
               "${GL_API}/projects/${ENC}" \
               -o "${RESP}") || CURL_RC=$?
@@ -556,6 +566,7 @@ jobs:
           GH_SCOPE: ${{ env.GH_NPM_SCOPE }}
           GH_PAT: ${{ secrets.GH_PAT }}
           GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
+          PKG_LIST: ${{ steps.pkgs.outputs.list }}
         run: |
           set -euo pipefail
           # Auth to GitHub npm for publish
@@ -565,7 +576,7 @@ jobs:
             echo "always-auth=true"
           } > .npmrc.gh
 
-          mapfile -t names < <(jq -r '.[]' <<< '${{ steps.pkgs.outputs.list }}')
+          mapfile -t names < <(jq -r '.[]' <<< "${PKG_LIST}")
 
           for src in "${names[@]}"; do
             echo "Source package: ${src}"
