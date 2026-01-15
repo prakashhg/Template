@@ -17,16 +17,16 @@ permissions:
 
 env:
   # Required
-  GL_URL: ${{ vars.GL_URL }}
-  GL_GROUP: ${{ vars.GL_GROUP }}
-  GH_OWNER: ${{ vars.GH_OWNER }}
+  GL_URL: ${{ vars.GL_URL }}              # e.g. https://gitlab.com
+  GL_GROUP: ${{ vars.GL_GROUP }}          # GitLab top-level group path
+  GH_OWNER: ${{ vars.GH_OWNER }}          # GitHub org/user
 
   # Optional behavior controls
-  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
-  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
-  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-  GL_REGISTRY: ${{ vars.GL_REGISTRY }}
-  GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}
+  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}          # "path" (default) or "fullpath"
+  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}          # e.g. "gl-"
+  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}    # used when REPO_NAME_MODE=fullpath (default "-")
+  GL_REGISTRY: ${{ vars.GL_REGISTRY }}                # optional GitLab registry override
+  GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}              # npm scope (owner/org) without "@"
 
   # Curl hardening (NO headers here)
   CURL_FLAGS: --http1.1 --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
@@ -467,6 +467,7 @@ jobs:
       max-parallel: 2
       matrix:
         project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+
     steps:
       - name: Setup Node & npm (GitHub registry primed)
         uses: actions/setup-node@v4
@@ -504,21 +505,20 @@ jobs:
             echo "::notice::Cannot resolve project id for ${GL_PROJECT}, skipping. (rc=${CURL_RC}, http=${HTTP:-n/a})"
             echo "npm_url=" >> "$GITHUB_OUTPUT"
             echo "group_scope=" >> "$GITHUB_OUTPUT"
+            echo "inst_host=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           PID="$(jq -r '.id // empty' "${RESP}")"
           TOP="$(jq -r '.namespace.full_path|split("/")[0]' "${RESP}")"
+          [[ -n "${PID}" && "${PID}" != "null" ]] || { echo "npm_url=" >> "$GITHUB_OUTPUT"; echo "group_scope=" >> "$GITHUB_OUTPUT"; echo "inst_host=" >> "$GITHUB_OUTPUT"; exit 0; }
 
-          if [[ -z "${PID}" || "${PID}" == "null" ]]; then
-            echo "::notice::Cannot resolve project id for ${GL_PROJECT}, skipping."
-            echo "npm_url=" >> "$GITHUB_OUTPUT"
-            echo "group_scope=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          NPM_URL="${GL_URL%/}/api/v4/projects/${PID}/packages/npm/"
+          INST_HOST="$(echo "${NPM_URL}" | awk -F/ '{print $3}')"
 
-          echo "npm_url=${GL_URL%/}/api/v4/projects/${PID}/packages/npm/" >> "$GITHUB_OUTPUT"
-          echo "group_scope=${TOP}" >> "$GITHUB_OUTPUT"
+          echo "npm_url=${NPM_URL}"   >> "$GITHUB_OUTPUT"
+          echo "group_scope=${TOP}"   >> "$GITHUB_OUTPUT"
+          echo "inst_host=${INST_HOST}" >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to GitLab npm (pull)
         if: ${{ steps.glnpm.outputs.npm_url != '' }}
@@ -527,21 +527,28 @@ jobs:
           GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
           GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
           GROUP_SCOPE: ${{ steps.glnpm.outputs.group_scope }}
+          INST_HOST: ${{ steps.glnpm.outputs.inst_host }}
         run: |
           set -euo pipefail
           {
-            # Auth for the project endpoint (tarballs)
+            # Default registry for unscoped names → project endpoint
+            echo "registry=${GL_NPM_URL}"
+            # Auth for project endpoint (tarballs & metadata)
             echo "//${GL_NPM_URL#https://}:_authToken=${GL_TOKEN}"
+            # Extra: auth for instance-level endpoint in case of redirects
+            if [[ -n "${INST_HOST:-}" ]]; then
+              echo "//${INST_HOST}/api/v4/packages/npm/:_authToken=${GL_TOKEN}"
+            fi
             echo "always-auth=true"
-            # Scope mapping so npm resolves tarballs for scoped pkgs to the project endpoint
+            # Map top-level group scope to the project endpoint (scoped names)
             if [[ -n "${GROUP_SCOPE:-}" ]]; then
               echo "@${GROUP_SCOPE}:registry=${GL_NPM_URL}"
             fi
           } > .npmrc.gl
           echo "Using .npmrc.gl:"
-          cat .npmrc.gl | sed 's/_authToken=.*/_authToken=*** (redacted)/'
+          sed 's/_authToken=.*/_authToken=*** (redacted)/' .npmrc.gl
 
-      - name: Detect npm packages in project (best-effort)
+      - name: Detect npm packages in project (best-effort, GitLab-only)
         id: pkgs
         if: ${{ steps.glnpm.outputs.npm_url != '' }}
         shell: bash
@@ -553,7 +560,7 @@ jobs:
           PROJ="${{ matrix.project }}"
           base="${PROJ##*/}"
 
-          # Heuristic candidates (include GitLab-style group scope)
+          # Heuristic candidates
           candidates=("${base}" "@${base}/${base}" "@${base}")
           if [[ -n "${GROUP_SCOPE:-}" ]]; then
             candidates+=("@${GROUP_SCOPE}/${base}")
@@ -561,17 +568,23 @@ jobs:
 
           found=()
           for name in "${candidates[@]}"; do
-            if NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm view "${name}" --registry="${GL_NPM_URL}" name >/dev/null 2>&1; then
+            # 1) Must exist at GitLab project endpoint
+            if ! NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm view "${name}" --registry="${GL_NPM_URL}" name >/dev/null 2>&1; then
+              continue
+            fi
+            # 2) Tarball must originate from GL_NPM_URL (avoid npmjs fallback)
+            url="$(NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm view "${name}" --registry="${GL_NPM_URL}" dist.tarball 2>/dev/null || true)"
+            if [[ -n "${url:-}" && "${url}" == "${GL_NPM_URL}"* ]]; then
               found+=("${name}")
             fi
           done
 
           if [[ ${#found[@]} -eq 0 ]]; then
-            echo "::notice::No npm packages auto-detected for ${PROJ}."
+            echo "::notice::No GitLab-hosted npm packages detected for ${PROJ}."
             echo "list=[]" >> "$GITHUB_OUTPUT"
           else
             printf '%s\n' "${found[@]}" | jq -R . | jq -s -c . | sed 's/^/list=/' >> "$GITHUB_OUTPUT"
-            echo "Detected npm packages: ${found[*]}"
+            echo "Detected GitLab npm packages: ${found[*]}"
           fi
 
       - name: Compute destination repo name (for npm linking)
@@ -608,7 +621,7 @@ jobs:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
-          # 1) Ensure GitHub scope
+          # 1) Ensure GitHub scope for GitHub Packages
           GH_SCOPE="${GH_SCOPE:-${GH_OWNER}}"
           if [[ -z "${GH_SCOPE}" ]]; then
             echo "::error::GH_NPM_SCOPE/GH_OWNER is empty; npm packages must be scoped to an owner (e.g., @org or @user)."
@@ -622,6 +635,7 @@ jobs:
             echo "always-auth=true"
           } > .npmrc.gh
 
+          workroot="$(pwd)"
           mapfile -t names < <(jq -r '.[]' <<< "${PKG_LIST}")
 
           for src in "${names[@]}"; do
@@ -639,7 +653,7 @@ jobs:
               echo "Processing ${src}@${v}"
               tgz=$(NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm pack "${src}@${v}" --registry="${GL_NPM_URL}" --loglevel=verbose | tail -n1 || true)
               if [[ -z "${tgz}" || ! -f "${tgz}" ]]; then
-                echo "::warning::Failed to fetch tarball for ${src}@${v}; check the 'npm pack' log above (auth/scope/endpoint)."
+                echo "::warning::Failed to fetch tarball for ${src}@${v}; see 'npm pack' log above."
                 continue
               fi
 
@@ -647,13 +661,10 @@ jobs:
               tar -xzf "${tgz}" -C "${workdir}"
               pkg="${workdir}/package/package.json"
 
-              # New name @<GH_SCOPE>/<basename_without_scope>
               newname="@${GH_SCOPE}/$(basename "${src#*@}")"
-
-              # Link to repo so it appears under that repo's "Packages"
               repo_url="https://github.com/${GH_OWNER}/${GH_REPO}.git"
 
-              # ---- FIX: set repository as an object unconditionally (no merge/if) ----
+              # Re-scope + set target registry + link repository (overwrite repository unconditionally)
               jq --arg newname "${newname}" \
                  --arg repo "${repo_url}" \
                  '
@@ -664,8 +675,9 @@ jobs:
                  ' "${pkg}" > "${pkg}.new"
               mv "${pkg}.new" "${pkg}"
 
-              newtgz="${newname//@/}-reScoped-${v}.tgz"
-              (cd "${workdir}/package" && tar -czf "${PWD}/${newtgz}" .)
+              # Write re-scoped tarball to the CURRENT working directory (fix path bug)
+              newtgz="${workroot}/${newname//@/}-reScoped-${v}.tgz"
+              tar -czf "${newtgz}" -C "${workdir}/package" .
               tgz="${newtgz}"
 
               if ! NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gh" npm publish "${tgz}" --access public --ignore-scripts; then
