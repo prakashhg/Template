@@ -1842,11 +1842,6 @@ on:
   push:
   delete:
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-
 jobs:
   discover_projects:
     # ...
