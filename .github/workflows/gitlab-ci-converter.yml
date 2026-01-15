@@ -15,21 +15,20 @@ permissions:
   contents: write
   packages: write
 
-# Top-level environment (safe for non-secret values)
 env:
-  # Required vars
-  GL_URL: ${{ vars.GL_URL }}          # e.g. https://gitlab.com or https://gitlab.example.com
-  GL_GROUP: ${{ vars.GL_GROUP }}      # GitLab top-level group path
-  GH_OWNER: ${{ vars.GH_OWNER }}      # GitHub org or user name
+  # Required
+  GL_URL: ${{ vars.GL_URL }}              # e.g. https://gitlab.com
+  GL_GROUP: ${{ vars.GL_GROUP }}          # GitLab top-level group path
+  GH_OWNER: ${{ vars.GH_OWNER }}          # GitHub org/user
 
   # Optional behavior controls
   REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}          # "path" (default) or "fullpath"
-  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}          # optional, e.g. "gl-"
+  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}          # e.g. "gl-"
   GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}    # used when REPO_NAME_MODE=fullpath (default "-")
-  GL_REGISTRY: ${{ vars.GL_REGISTRY }}                # optional override for GitLab registry domain
+  GL_REGISTRY: ${{ vars.GL_REGISTRY }}                # optional GitLab registry override
   GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}              # npm scope (owner/org) without "@"
 
-  # Hardened curl flags used everywhere we talk to GitLab APIs (NO headers here)
+  # Curl hardening (no headers here to avoid word-splitting)
   CURL_FLAGS: --http1.1 --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
 
 jobs:
@@ -115,7 +114,7 @@ jobs:
               path=$(jq -r '.path_with_namespace // empty' <<<"${proj}")
               [[ -z "${path}" ]] && continue
 
-              # compute destination repo name
+              # destination naming
               if [[ "${MODE}" == "fullpath" ]]; then
                 base="$(echo "${path}" | tr '/' "${SEP}")"
               else
@@ -123,9 +122,9 @@ jobs:
               fi
               dest="${PREF}${base}"
 
-              # example exclude rule: skip deletion-scheduled repos
+              # optionally exclude deletion-scheduled
               if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
-                echo "Exclude (deletion-scheduled): ${dest} (from GL: ${path})"
+                echo "Exclude (deletion-scheduled): ${dest} (GL: ${path})"
               else
                 filtered+=("${path}")
               fi
@@ -208,6 +207,7 @@ jobs:
           GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
           GL_REGISTRY: ${{ env.GL_REGISTRY }}
           CURL_FLAGS: ${{ env.CURL_FLAGS }}
+          GH_TOKEN: ${{ github.token }}   # allow gh api in Actions
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
@@ -227,7 +227,6 @@ jobs:
             fi
           fi
 
-          # Resolve GitLab username for skopeo logins
           GL_USER="$(curl -s ${CURL_FLAGS} \
                       -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
                       -H "Accept: application/json" \
@@ -346,7 +345,7 @@ jobs:
               continue
             fi
 
-            # List tags (paged)
+            # List tags
             repo_id="$(jq -r '.id' <<< "${obj}")"
             tags="[]"; page=1
             while :; do
@@ -388,7 +387,6 @@ jobs:
 
             echo "→ ${reg_domain}/${reg_path} ==> ghcr.io/${dest_path} (${tcount} tag(s))"
 
-            # Login to GitLab registry once per domain (fallbacks)
             if [[ -z "${LOGGED[${reg_domain}]:-}" ]]; then
               if  try_login "${reg_domain}" "${GL_USER}" "${GL_TOKEN}" \
                || try_login "${reg_domain}" "oauth2" "${GL_TOKEN}" \
@@ -400,7 +398,6 @@ jobs:
               fi
             fi
 
-            # Copy each tag
             while IFS= read -r t; do
               SRC="docker://${reg_domain}/${reg_path}:${t}"
               DEST="docker://ghcr.io/${dest_path}:${t}"
@@ -421,7 +418,6 @@ jobs:
 
           done
 
-          # Emit touched package names (for verification step)
           {
             for k in "${!TOUCHED[@]}"; do printf '%s\n' "$k"; done
           } | jq -R . | jq -s -c . | sed 's/^/pkg_names=/' >> "$GITHUB_OUTPUT"
@@ -432,10 +428,10 @@ jobs:
         env:
           PKG_NAMES: ${{ steps.copy.outputs.pkg_names }}
           GH_OWNER: ${{ env.GH_OWNER }}
+          GH_TOKEN: ${{ github.token }}   # required by gh in Actions
         run: |
           set -euo pipefail
           echo "Listing container packages under owner: ${GH_OWNER}"
-          # Probe org endpoint; if not an org, fall back to user endpoint
           if gh api "/orgs/${GH_OWNER}" >/dev/null 2>&1; then
             gh api -H "Accept: application/vnd.github+json" \
               "/orgs/${GH_OWNER}/packages?package_type=container" \
@@ -507,17 +503,22 @@ jobs:
           if [[ ${CURL_RC} -ne 0 || "${HTTP}" != "200" ]]; then
             echo "::notice::Cannot resolve project id for ${GL_PROJECT}, skipping. (rc=${CURL_RC}, http=${HTTP:-n/a})"
             echo "npm_url=" >> "$GITHUB_OUTPUT"
+            echo "group_scope=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           PID="$(jq -r '.id // empty' "${RESP}")"
+          TOP="$(jq -r '.namespace.full_path|split("/")[0]' "${RESP}")"
+
           if [[ -z "${PID}" || "${PID}" == "null" ]]; then
             echo "::notice::Cannot resolve project id for ${GL_PROJECT}, skipping."
             echo "npm_url=" >> "$GITHUB_OUTPUT"
+            echo "group_scope=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "npm_url=${GL_URL%/}/api/v4/projects/${PID}/packages/npm/" >> "$GITHUB_OUTPUT"
+          echo "group_scope=${TOP}" >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to GitLab npm (pull)
         if: ${{ steps.glnpm.outputs.npm_url != '' }}
@@ -525,12 +526,20 @@ jobs:
         env:
           GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
           GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GROUP_SCOPE: ${{ steps.glnpm.outputs.group_scope }}
         run: |
           set -euo pipefail
           {
+            # Auth for the project endpoint (tarballs)
             echo "//${GL_NPM_URL#https://}:_authToken=${GL_TOKEN}"
             echo "always-auth=true"
+            # Scope mapping so npm resolves tarballs for scoped pkgs to the project endpoint
+            if [[ -n "${GROUP_SCOPE:-}" ]]; then
+              echo "@${GROUP_SCOPE}:registry=${GL_NPM_URL}"
+            fi
           } > .npmrc.gl
+          echo "Using .npmrc.gl:"
+          cat .npmrc.gl | sed 's/_authToken=.*/_authToken=*** (redacted)/'
 
       - name: Detect npm packages in project (best-effort)
         id: pkgs
@@ -538,12 +547,18 @@ jobs:
         shell: bash
         env:
           GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
+          GROUP_SCOPE: ${{ steps.glnpm.outputs.group_scope }}
         run: |
           set -euo pipefail
           PROJ="${{ matrix.project }}"
           base="${PROJ##*/}"
-          # Heuristic candidates; replace with a known list if you prefer
+
+          # Heuristic candidates (include GitLab-style group scope)
           candidates=("${base}" "@${base}/${base}" "@${base}")
+          if [[ -n "${GROUP_SCOPE:-}" ]]; then
+            candidates+=("@${GROUP_SCOPE}/${base}")
+          fi
+
           found=()
           for name in "${candidates[@]}"; do
             if NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm view "${name}" --registry="${GL_NPM_URL}" name >/dev/null 2>&1; then
@@ -593,7 +608,7 @@ jobs:
           GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
-          # 1) Ensure scope is set and valid for GitHub Packages
+          # 1) Ensure GitHub scope
           GH_SCOPE="${GH_SCOPE:-${GH_OWNER}}"
           if [[ -z "${GH_SCOPE}" ]]; then
             echo "::error::GH_NPM_SCOPE/GH_OWNER is empty; npm packages must be scoped to an owner (e.g., @org or @user)."
@@ -622,9 +637,9 @@ jobs:
 
             for v in "${versions[@]}"; do
               echo "Processing ${src}@${v}"
-              tgz=$(NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm pack "${src}@${v}" --registry="${GL_NPM_URL}" 2>/dev/null | tail -n1 || true)
+              tgz=$(NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm pack "${src}@${v}" --registry="${GL_NPM_URL}" --loglevel=verbose | tail -n1 || true)
               if [[ -z "${tgz}" || ! -f "${tgz}" ]]; then
-                echo "::warning::Failed to fetch tarball for ${src}@${v}; skipping."
+                echo "::warning::Failed to fetch tarball for ${src}@${v}; check the 'npm pack' log above (auth/scope/endpoint)."
                 continue
               fi
 
@@ -632,13 +647,12 @@ jobs:
               tar -xzf "${tgz}" -C "${workdir}"
               pkg="${workdir}/package/package.json"
 
-              # Compute new name @<GH_SCOPE>/<basename_without_scope>
+              # New name @<GH_SCOPE>/<basename_without_scope>
               newname="@${GH_SCOPE}/$(basename "${src#*@}")"
 
-              # Guess a GitHub repo to link the package to (so it appears in that repo's "Packages")
+              # Link to repo so it appears under that repo's "Packages"
               repo_url="https://github.com/${GH_OWNER}/${GH_REPO}.git"
 
-              # 3) Re-scope name, add publishConfig.registry, and add repository to link package to repo UI
               jq --arg newname "${newname}" \
                  --arg repo "${repo_url}" \
                  '
@@ -656,7 +670,6 @@ jobs:
               (cd "${workdir}/package" && tar -czf "${PWD}/${newtgz}" .)
               tgz="${newtgz}"
 
-              # 4) Publish to GitHub npm (public)
               if ! NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gh" npm publish "${tgz}" --access public --ignore-scripts; then
                 echo "::warning::Publish failed for ${src}@${v}"
               else
@@ -670,10 +683,10 @@ jobs:
         shell: bash
         env:
           GH_OWNER: ${{ env.GH_OWNER }}
+          GH_TOKEN: ${{ github.token }}   # required by gh in Actions
         run: |
           set -euo pipefail
           echo "Listing npm packages under owner: ${GH_OWNER}"
-          # Try org endpoint first, then user
           if gh api "/orgs/${GH_OWNER}" >/dev/null 2>&1; then
             gh api -H "Accept: application/vnd.github+json" \
               "/orgs/${GH_OWNER}/packages?package_type=npm" --paginate --jq '.[].name' || true
@@ -685,3 +698,4 @@ jobs:
       - name: Summary (npm)
         if: always()
         run: echo "npm package migration finished for ${{ matrix.project }}"
+``
