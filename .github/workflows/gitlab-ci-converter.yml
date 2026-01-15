@@ -26,7 +26,7 @@ permissions:
   packages: write
 
 env:
-  # Read-only defaults; can be overridden by repo Variables (Settings ▸ Variables)
+  # Read-only defaults; can be set as repo Variables (Settings ▸ Variables)
   REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}          # fullpath | path | basename
   GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
   GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
@@ -42,17 +42,31 @@ jobs:
     steps:
       - name: Validate inputs & variables
         shell: bash
+        env:
+          GROUP_PATH: ${{ github.event.inputs.group_path }}
+          GL_URL_VAR: ${{ vars.GL_URL }}
+          GH_OWNER_VAR: ${{ vars.GH_OWNER }}
         run: |
           set -euo pipefail
-          : "${{ github.event.inputs.group_path?Need group_path }}"
-          : "${GL_URL?Need GL_URL (repo variable)}}"
-          : "${GH_OWNER?Need GH_OWNER (repo variable)}}"
+          if [[ -z "${GROUP_PATH:-}" ]]; then
+            echo "::error::Missing required input: group_path"
+            exit 1
+          fi
+          if [[ -z "${GL_URL_VAR:-}" ]]; then
+            echo "::error::Missing required repo variable: GL_URL (Settings ▸ Variables)"
+            exit 1
+          fi
+          if [[ -z "${GH_OWNER_VAR:-}" ]]; then
+            echo "::error::Missing required repo variable: GH_OWNER (Settings ▸ Variables)"
+            exit 1
+          fi
 
       - name: List projects in group (recursive)
         id: list
         env:
           GROUP_PATH: ${{ github.event.inputs.group_path }}
           GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+          GL_URL:     ${{ env.GL_URL }}
         shell: bash
         run: |
           set -euo pipefail
@@ -77,7 +91,6 @@ jobs:
             page="$next"
           done
 
-          # we only need path_with_namespace for downstream registry paths
           jq -c '[.[].path_with_namespace]' <<<"$all" > projects.json
           echo "Found $(jq 'length' projects.json) project(s)."
 
@@ -123,6 +136,9 @@ jobs:
         id: repo
         env:
           GL_PROJECT: ${{ matrix.project }}
+          REPO_NAME_MODE: ${{ env.REPO_NAME_MODE }}
+          GH_REPO_PREFIX: ${{ env.GH_REPO_PREFIX }}
+          GH_REPO_SEPARATOR: ${{ env.GH_REPO_SEPARATOR }}
         shell: bash
         run: |
           set -euo pipefail
@@ -143,6 +159,7 @@ jobs:
         id: ids
         env:
           GL_PROJECT: ${{ matrix.project }}
+          GL_URL:     ${{ env.GL_URL }}
         shell: bash
         run: |
           set -euo pipefail
@@ -208,10 +225,10 @@ jobs:
           GL_PROJECT: ${{ matrix.project }}
           GH_REPO:    ${{ steps.repo.outputs.gh_repo }}
           GH_OWNER:   ${{ env.GH_OWNER }}
-          GL_REG:     ${{ steps.ids.outputs.gl_reg }}
           DRY_RUN:    ${{ env.DRY_RUN }}
           GL_API:     ${{ steps.ids.outputs.gl_api }}
           GL_ENC:     ${{ steps.ids.outputs.gl_enc }}
+          GL_REG:     ${{ steps.ids.outputs.gl_reg }}
         run: |
           set -euo pipefail
           json='${{ steps.gl_repos.outputs.list }}'
