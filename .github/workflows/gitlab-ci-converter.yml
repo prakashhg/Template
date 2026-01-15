@@ -27,7 +27,7 @@ env:
   GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}          # optional, e.g. "gl-"
   GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}    # used when REPO_NAME_MODE=fullpath (default "-")
   GL_REGISTRY: ${{ vars.GL_REGISTRY }}                # optional override for GitLab registry domain
-  GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}              # for npm migration: GitHub scope (org/user) without "@"
+  GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}              # npm scope (owner/org) without "@"
 
   # Hardened curl flags used everywhere we talk to GitLab APIs (NO headers here)
   CURL_FLAGS: --http1.1 --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
@@ -559,17 +559,48 @@ jobs:
             echo "Detected npm packages: ${found[*]}"
           fi
 
+      - name: Compute destination repo name (for npm linking)
+        id: repo
+        if: ${{ steps.glnpm.outputs.npm_url != '' }}
+        shell: bash
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+          REPO_NAME_MODE: ${{ env.REPO_NAME_MODE }}
+          GH_REPO_PREFIX: ${{ env.GH_REPO_PREFIX }}
+          GH_REPO_SEPARATOR: ${{ env.GH_REPO_SEPARATOR }}
+        run: |
+          set -euo pipefail
+          MODE="${REPO_NAME_MODE:-path}"
+          SEP="${GH_REPO_SEPARATOR:--}"
+          PREF="${GH_REPO_PREFIX:-}"
+          if [[ "${MODE}" == "fullpath" ]]; then
+            base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
+          else
+            base="${GL_PROJECT##*/}"
+          fi
+          GH_REPO="${PREF}${base}"
+          echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
+
       - name: Migrate npm packages (all versions → GitHub npm)
         if: ${{ steps.pkgs.outputs.list != '[]' }}
         shell: bash
         env:
           GH_SCOPE: ${{ env.GH_NPM_SCOPE }}
+          GH_OWNER: ${{ env.GH_OWNER }}
           GH_PAT: ${{ secrets.GH_PAT }}
           GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
           PKG_LIST: ${{ steps.pkgs.outputs.list }}
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
         run: |
           set -euo pipefail
-          # Auth to GitHub npm for publish
+          # 1) Ensure scope is set and valid for GitHub Packages
+          GH_SCOPE="${GH_SCOPE:-${GH_OWNER}}"
+          if [[ -z "${GH_SCOPE}" ]]; then
+            echo "::error::GH_NPM_SCOPE/GH_OWNER is empty; npm packages must be scoped to an owner (e.g., @org or @user)."
+            exit 1
+          fi
+
+          # 2) Auth to GitHub npm for publish
           {
             echo "@${GH_SCOPE}:registry=https://npm.pkg.github.com"
             echo "//npm.pkg.github.com/:_authToken=${GH_PAT}"
@@ -597,30 +628,59 @@ jobs:
                 continue
               fi
 
-              # Re-scope to GitHub owner if needed
-              if [[ "${src}" != @${GH_SCOPE}/* ]]; then
-                echo "Re-scoping to @${GH_SCOPE}/$(basename "${src}")"
-                workdir="$(mktemp -d)"
-                tar -xzf "${tgz}" -C "${workdir}"
-                pkg="${workdir}/package/package.json"
-                jq --arg scope "@${GH_SCOPE}" --arg src "${src}" '
-                  .name as $old
-                  | .name = ($scope + "/" + ($old | split("/") | last))
-                ' "${pkg}" > "${pkg}.new"
-                mv "${pkg}.new" "${pkg}"
-                newtgz="${src//@/}-reScoped-${v}.tgz"
-                tar -czf "${newtgz}" -C "${workdir}/package" .
-                tgz="${newtgz}"
-              fi
+              workdir="$(mktemp -d)"
+              tar -xzf "${tgz}" -C "${workdir}"
+              pkg="${workdir}/package/package.json"
 
-              # Publish to GitHub npm (explicit public visibility to avoid private-by-default for scopes)
+              # Compute new name @<GH_SCOPE>/<basename_without_scope>
+              newname="@${GH_SCOPE}/$(basename "${src#*@}")"
+
+              # Guess a GitHub repo to link the package to (so it appears in that repo's "Packages")
+              repo_url="https://github.com/${GH_OWNER}/${GH_REPO}.git"
+
+              # 3) Re-scope name, add publishConfig.registry, and add repository to link package to repo UI
+              jq --arg newname "${newname}" \
+                 --arg repo "${repo_url}" \
+                 '
+                   .name = $newname
+                   | .publishConfig = (.publishConfig // {})
+                   | .publishConfig.registry = "https://npm.pkg.github.com"
+                   | .repository = (
+                       if .repository == null then { "type":"git","url": $repo }
+                       else .repository + { "type":"git","url": $repo }
+                     )
+                 ' "${pkg}" > "${pkg}.new"
+              mv "${pkg}.new" "${pkg}"
+
+              newtgz="${newname//@/}-reScoped-${v}.tgz"
+              (cd "${workdir}/package" && tar -czf "${PWD}/${newtgz}" .)
+              tgz="${newtgz}"
+
+              # 4) Publish to GitHub npm (public)
               if ! NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gh" npm publish "${tgz}" --access public --ignore-scripts; then
                 echo "::warning::Publish failed for ${src}@${v}"
               else
-                echo "Published ${src}@${v} → GitHub npm under @${GH_SCOPE}/$(basename "${src}")"
+                echo "Published ${newname}@${v} → GitHub Packages"
               fi
             done
           done
+
+      - name: Verify npm packages under owner
+        if: always()
+        shell: bash
+        env:
+          GH_OWNER: ${{ env.GH_OWNER }}
+        run: |
+          set -euo pipefail
+          echo "Listing npm packages under owner: ${GH_OWNER}"
+          # Try org endpoint first, then user
+          if gh api "/orgs/${GH_OWNER}" >/dev/null 2>&1; then
+            gh api -H "Accept: application/vnd.github+json" \
+              "/orgs/${GH_OWNER}/packages?package_type=npm" --paginate --jq '.[].name' || true
+          else
+            gh api -H "Accept: application/vnd.github+json" \
+              "/users/${GH_OWNER}/packages?package_type=npm" --paginate --jq '.[].name' || true
+          fi
 
       - name: Summary (npm)
         if: always()
