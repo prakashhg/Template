@@ -1,5 +1,5 @@
 
-name: "GitLab → GHCR (group-wide) — package/image migration"
+name: "GitLab → GHCR/npm (group-wide) — package/image migration"
 
 on:
   workflow_dispatch:
@@ -15,20 +15,25 @@ permissions:
   contents: write
   packages: write
 
-# Repository/Org “Variables” expected (Settings ▸ Secrets and variables ▸ Actions ▸ Variables)
-# We purposely use vars.* here. Do NOT reference env.* in matrix/if/runs-on.
+# Expected Variables (Settings ▸ Secrets and variables ▸ Actions ▸ Variables)
+# Using vars.* here is safe (and preferred) for top-level env.
 env:
   GL_URL:            ${{ vars.GL_URL }}             # e.g. https://gitlab.com or https://gitlab.example.com
   GL_GROUP:          ${{ vars.GL_GROUP }}           # GitLab top-level group path
-  GH_OWNER:          ${{ vars.GH_OWNER }}           # GitHub org/owner name
+  GH_OWNER:          ${{ vars.GH_OWNER }}           # GitHub org or user name
   REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}     # "path" (default) or "fullpath"
   GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}     # optional, e.g. "gl-"
   GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}  # used when REPO_NAME_MODE=fullpath (default "-")
   GL_REGISTRY:       ${{ vars.GL_REGISTRY }}        # optional override for GitLab registry domain
+  GH_NPM_SCOPE:      ${{ vars.GH_NPM_SCOPE }}       # for npm migration: GitHub scope (org/user) without "@"
+
+# Expected Secrets (Settings ▸ Secrets and variables ▸ Actions ▸ Secrets)
+# - GITLAB_TOKEN : GitLab PAT with API + registry read
+# - GH_PAT       : GitHub classic PAT with write:packages (and read:packages if needed)
 
 jobs:
   discover_projects:
-    name: "1) Discover GitLab projects for package migration"
+    name: "1) Discover GitLab projects for migration"
     runs-on: ubuntu-latest
     outputs:
       project_list: ${{ steps.collect.outputs.project_list }}
@@ -174,15 +179,13 @@ jobs:
           GL_URL:     ${{ env.GL_URL }}
           GL_PROJECT: ${{ matrix.project }}
           GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
-          GL_REGISTRY: ${{ env.GL_REGISTRY }}
+          GL_REGISTRY:${{ env.GL_REGISTRY }}
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
           GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
           GH_USER="$(gh api user --jq .login)"
           [[ -n "${GH_USER}" ]] || { echo "Failed to resolve GitHub user"; exit 1; }
-
-          # Resolve GitLab registry domain (gitlab.com -> registry.gitlab.com; self-managed -> registry.<host>)
           host="${GL_URL#*://}"; host="${host##*@}"; host="${host%%/*}"
           if [[ -n "${GL_REGISTRY:-}" ]]; then
             GL_REG="${GL_REGISTRY}"
@@ -193,11 +196,8 @@ jobs:
               GL_REG="registry.${host}"
             fi
           fi
-
-          # Best-effort GitLab username
           GL_USER="$(curl -s -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/user" | jq -r '.username // empty')"
           [[ -z "${GL_USER}" || "${GL_USER}" == "null" ]] && GL_USER="oauth2"
-
           {
             echo "gl_api=${GL_API}"
             echo "gl_enc=${GL_ENC}"
@@ -258,7 +258,7 @@ jobs:
           GH_OWNER:  ${{ env.GH_OWNER }}
           GH_REPO:   ${{ steps.repo.outputs.gh_repo }}
           DRY_RUN:   ${{ env.DRY_RUN }}
-          GL_PROJECT: ${{ matrix.project }}
+          GL_PROJECT:${{ matrix.project }}
         run: |
           set -euo pipefail
           json="${REPO_LIST}"
@@ -308,7 +308,7 @@ jobs:
               continue
             fi
 
-            # Preserve suffix beyond project root (pure Bash)
+            # Preserve suffix beyond project root
             suffix="${reg_path#${GL_PROJECT}}"
             if [[ "${suffix}" == "${reg_path}" ]]; then
               proj_name="${GL_PROJECT##*/}"
@@ -321,7 +321,7 @@ jobs:
 
             echo "→ ${reg_domain}/${reg_path} ==> ghcr.io/${dest_path} (${tcount} tag(s))"
 
-            # Login to GitLab registry once per domain (with fallbacks)
+            # Login to GitLab registry once per domain (fallbacks)
             if [[ -z "${LOGGED[${reg_domain}]:-}" ]]; then
               if  try_login "${reg_domain}" "${GL_USER}"           "${GL_TOKEN}" \
                || try_login "${reg_domain}" "oauth2"               "${GL_TOKEN}" \
@@ -351,12 +351,12 @@ jobs:
             done < <(jq -r '.[].name' <<< "${tags}")
           done
 
-          # Emit touched package names
+          # Emit touched package names (for verification step)
           {
             for k in "${!TOUCHED[@]}"; do printf '%s\n' "$k"; done
           } | jq -R . | jq -s -c . | sed 's/^/pkg_names=/' >> "$GITHUB_OUTPUT"
 
-      - name: Verify GHCR images & tags
+      - name: Verify GHCR images & tags (user-or-org safe)
         if: always()
         shell: bash
         env:
@@ -364,8 +364,18 @@ jobs:
           GH_OWNER:  ${{ env.GH_OWNER }}
         run: |
           set -euo pipefail
-          echo "Listing container packages under org: ${GH_OWNER}"
-          gh api -H "Accept: application/vnd.github+json" "/orgs/${GH_OWNER}/packages?package_type=container" --paginate --jq '.[].name' || true
+          echo "Listing container packages under owner: ${GH_OWNER}"
+
+          # Probe org endpoint; if not an org, fall back to user endpoint
+          if gh api "/orgs/${GH_OWNER}" >/dev/null 2>&1; then
+            gh api -H "Accept: application/vnd.github+json" \
+              "/orgs/${GH_OWNER}/packages?package_type=container" \
+              --paginate --jq '.[].name' || true
+          else
+            gh api -H "Accept: application/vnd.github+json" \
+              "/users/${GH_OWNER}/packages?package_type=container" \
+              --paginate --jq '.[].name' || true
+          fi
 
           echo "Attempting tag listing via skopeo for touched packages..."
           if [[ -n "${PKG_NAMES:-}" && "${PKG_NAMES}" != "[]" ]]; then
@@ -378,7 +388,152 @@ jobs:
             echo "No package names captured (copy found no tags or DRY_RUN=true)."
           fi
 
-      - name: Summary
+      - name: Summary (containers)
         if: always()
         run: |
           echo "Container image migration job finished for ${{ matrix.project }} (GL → GHCR)."
+
+  npm_registry_migration_all:
+    name: "3) Package Registry · npm (GitLab → GitHub npm) — ALL projects"
+    needs: [discover_projects]
+    if: needs.discover_projects.outputs.project_list != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+    steps:
+      - name: Setup Node & npm (GitHub registry primed)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: "@${{ env.GH_NPM_SCOPE }}"
+
+      - name: Install jq
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Compute GitLab npm endpoint
+        id: glnpm
+        shell: bash
+        env:
+          GL_URL:     ${{ env.GL_URL }}
+          GL_PROJECT: ${{ matrix.project }}
+          GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          ENC=$(jq -rn --arg x "$GL_PROJECT" '$x|@uri')
+          PID=$(curl -sS -H "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/projects/${ENC}" | jq -r '.id // empty')
+          if [[ -z "$PID" || "$PID" == "null" ]]; then
+            echo "::notice::Cannot resolve project id for ${GL_PROJECT}, skipping."
+            echo "npm_url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "npm_url=${GL_URL%/}/api/v4/projects/${PID}/packages/npm/" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to GitLab npm (pull)
+        if: ${{ steps.glnpm.outputs.npm_url != '' }}
+        shell: bash
+        env:
+          GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
+          GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          set -euo pipefail
+          {
+            echo "//${GL_NPM_URL#https://}:_authToken=${GL_TOKEN}"
+            echo "always-auth=true"
+          } > .npmrc.gl
+
+      - name: Detect npm packages in project (best-effort)
+        id: pkgs
+        if: ${{ steps.glnpm.outputs.npm_url != '' }}
+        shell: bash
+        env:
+          GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
+        run: |
+          set -euo pipefail
+          PROJ="${{ matrix.project }}"
+          base="${PROJ##*/}"
+          # Heuristic candidates; replace with a known list if you prefer
+          candidates=("${base}" "@${base}/${base}" "@${base}")
+          found=()
+          for name in "${candidates[@]}"; do
+            if NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm view "${name}" --registry="$GL_NPM_URL" name >/dev/null 2>&1; then
+              found+=("${name}")
+            fi
+          done
+          if [[ ${#found[@]} -eq 0 ]]; then
+            echo "::notice::No npm packages auto-detected for ${PROJ}."
+            echo "list=[]" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "${found[@]}" | jq -R . | jq -s -c . | sed 's/^/list=/' >> "$GITHUB_OUTPUT"
+            echo "Detected npm packages: ${found[*]}"
+          fi
+
+      - name: Migrate npm packages (all versions → GitHub npm)
+        if: ${{ steps.pkgs.outputs.list != '[]' }}
+        shell: bash
+        env:
+          GH_SCOPE:   ${{ env.GH_NPM_SCOPE }}
+          GH_PAT:     ${{ secrets.GH_PAT }}
+          GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
+        run: |
+          set -euo pipefail
+          # Auth to GitHub npm for publish
+          {
+            echo "@${GH_SCOPE}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${GH_PAT}"
+            echo "always-auth=true"
+          } > .npmrc.gh
+
+          mapfile -t names < <(jq -r '.[]' <<< '${{ steps.pkgs.outputs.list }}')
+          for src in "${names[@]}"; do
+            echo "Source package: ${src}"
+
+            versions_json=$(NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm view "${src}" --registry="$GL_NPM_URL" versions --json || echo "[]")
+            [[ -z "${versions_json}" || "${versions_json}" == "null" ]] && versions_json="[]"
+            mapfile -t versions < <(jq -r '.[]?' <<< "${versions_json}")
+
+            if [[ ${#versions[@]} -eq 0 ]]; then
+              echo "::notice::No versions found for ${src}; skipping."
+              continue
+            fi
+
+            for v in "${versions[@]}"; do
+              echo "Processing ${src}@${v}"
+              tgz="$(NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm pack "${src}@${v}" --registry="$GL_NPM_URL" 2>/dev/null | tail -n1 || true)"
+              if [[ -z "${tgz}" || ! -f "${tgz}" ]]; then
+                echo "::warning::Failed to fetch tarball for ${src}@${v}; skipping."
+                continue
+              fi
+
+              # Re-scope to GitHub owner if needed
+              if [[ "${src}" != @${GH_SCOPE}/* ]]; then
+                echo "Re-scoping to @${GH_SCOPE}/$(basename "${src}")"
+                workdir="$(mktemp -d)"
+                tar -xzf "${tgz}" -C "${workdir}"
+                pkg="${workdir}/package/package.json"
+                jq --arg scope "@${GH_SCOPE}" --arg src "${src}" '
+                  .name as $old
+                  | .name = ($scope + "/" + ($old | split("/") | last))
+                ' "${pkg}" > "${pkg}.new"
+                mv "${pkg}.new" "${pkg}"
+                newtgz="${src//\//@}-reScoped-${v}.tgz"
+                (cd "${workdir}/package" && tar -czf "../../${newtgz}" .)
+                tgz="${newtgz}"
+              fi
+
+              # Publish to GitHub npm (scoped pkgs default private; set visibility explicitly)
+              if ! NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gh" npm publish "${tgz}" --access public --ignore-scripts; then
+                echo "::warning::Publish failed for ${src}@${v}"
+              else
+                echo "Published ${src}@${v} → GitHub npm under @${GH_SCOPE}/$(basename "${src}")"
+              fi
+            done
+          done
+
+      - name: Summary (npm)
+        if: always()
+        run: echo "npm package migration finished for ${{ matrix.project }}"
