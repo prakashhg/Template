@@ -17,13 +17,14 @@ permissions:
 
 env:
   # Expected repo variables (Settings ▸ Secrets and variables ▸ Actions ▸ Variables)
-  GL_URL: ${{ vars.GL_URL }}
-  GL_GROUP: ${{ vars.GL_GROUP }}
-  GH_OWNER: ${{ vars.GH_OWNER }}
-  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
-  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
-  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-  GL_REGISTRY: ${{ vars.GL_REGISTRY }}
+  GL_URL:               ${{ vars.GL_URL }}
+  GL_GROUP:             ${{ vars.GL_GROUP }}
+  GH_OWNER:             ${{ vars.GH_OWNER }}
+  REPO_NAME_MODE:       ${{ vars.REPO_NAME_MODE }}      # "path" (default) or "fullpath"
+  GH_REPO_PREFIX:       ${{ vars.GH_REPO_PREFIX }}      # optional e.g. "gl-"
+  GH_REPO_SEPARATOR:    ${{ vars.GH_REPO_SEPARATOR }}   # used when REPO_NAME_MODE=fullpath (default "-")
+  GL_REGISTRY:          ${{ vars.GL_REGISTRY }}         # optional override of GitLab registry domain
+  MAKE_PUBLIC:          ${{ vars.MAKE_PUBLIC }}         # optional "true"/"false" for final visibility
 
 jobs:
   # 1) Discover all projects under the GitLab group (including subgroups)
@@ -36,16 +37,17 @@ jobs:
       - name: Validate required variables
         shell: bash
         env:
-          GL_URL_VAR: ${{ env.GL_URL }}
+          GL_URL_VAR:   ${{ env.GL_URL }}
           GL_GROUP_VAR: ${{ env.GL_GROUP }}
           GH_OWNER_VAR: ${{ env.GH_OWNER }}
         run: |
           set -euo pipefail
-          [[ -n "${GL_URL_VAR:-}" ]]   || { echo "::error::Missing repo variable GL_URL";   exit 1; }
+          [[ -n "${GL_URL_VAR:-}"   ]] || { echo "::error::Missing repo variable GL_URL";   exit 1; }
           [[ -n "${GL_GROUP_VAR:-}" ]] || { echo "::error::Missing repo variable GL_GROUP"; exit 1; }
           [[ -n "${GH_OWNER_VAR:-}" ]] || { echo "::error::Missing repo variable GH_OWNER"; exit 1; }
 
       - name: Install jq & curl
+        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -55,11 +57,11 @@ jobs:
         id: collect
         shell: bash
         env:
-          GL_URL:   ${{ env.GL_URL }}
-          GL_GROUP: ${{ env.GL_GROUP }}
-          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          REPO_NAME_MODE: ${{ env.REPO_NAME_MODE }}
-          GH_REPO_PREFIX: ${{ env.GH_REPO_PREFIX }}
+          GL_URL:            ${{ env.GL_URL }}
+          GL_GROUP:          ${{ env.GL_GROUP }}
+          GL_TOKEN:          ${{ secrets.GITLAB_TOKEN }}
+          REPO_NAME_MODE:    ${{ env.REPO_NAME_MODE }}
+          GH_REPO_PREFIX:    ${{ env.GH_REPO_PREFIX }}
           GH_REPO_SEPARATOR: ${{ env.GH_REPO_SEPARATOR }}
         run: |
           set -euo pipefail
@@ -71,17 +73,20 @@ jobs:
 
           page=1
           filtered=()
+
           while true; do
             RESP=$(mktemp) ; HDR=$(mktemp)
             HTTP=$(curl -sS -D "${HDR}" -w '%{http_code}' \
               -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
               "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" \
               -o "${RESP}")
+
             if [[ "${HTTP}" != "200" ]]; then
               echo "::error::GitLab API returned HTTP ${HTTP} for groups/${GL_GROUP}/projects"
               head -c 500 "${RESP}" || true
               exit 1
             fi
+
             [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "::error::Expected array"; exit 1; }
 
             while read -r proj; do
@@ -119,14 +124,17 @@ jobs:
     needs: [discover_projects]
     if: needs.discover_projects.outputs.project_list != '[]'
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
         project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+
     env:
-      DRY_RUN: ${{ github.event.inputs.dry_run }}
-      MAKE_PUBLIC: ${{ vars.MAKE_PUBLIC }}
+      DRY_RUN:     ${{ github.event.inputs.dry_run }}
+      MAKE_PUBLIC: ${{ env.MAKE_PUBLIC }}
+
     steps:
       - name: Install jq, curl, gh, skopeo
         shell: bash
@@ -136,10 +144,10 @@ jobs:
           sudo apt-get install -y jq curl skopeo gnupg software-properties-common
           if ! command -v gh >/dev/null 2>&1; then
             curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
-            sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+              sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
             sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-              | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
+              sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
             sudo apt-get update -y && sudo apt-get install -y gh
           fi
           gh --version
@@ -157,9 +165,9 @@ jobs:
         id: repo
         shell: bash
         env:
-          GL_PROJECT: ${{ matrix.project }}
-          REPO_NAME_MODE: ${{ env.REPO_NAME_MODE }}
-          GH_REPO_PREFIX: ${{ env.GH_REPO_PREFIX }}
+          GL_PROJECT:        ${{ matrix.project }}
+          REPO_NAME_MODE:    ${{ env.REPO_NAME_MODE }}
+          GH_REPO_PREFIX:    ${{ env.GH_REPO_PREFIX }}
           GH_REPO_SEPARATOR: ${{ env.GH_REPO_SEPARATOR }}
         run: |
           set -euo pipefail
@@ -178,9 +186,9 @@ jobs:
         id: ids
         shell: bash
         env:
-          GL_URL:     ${{ env.GL_URL }}
-          GL_PROJECT: ${{ matrix.project }}   # <-- fixed: space after colon
-          GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
+          GL_URL:      ${{ env.GL_URL }}
+          GL_PROJECT:  ${{ matrix.project }} # <-- space after colon fixed
+          GL_TOKEN:    ${{ secrets.GITLAB_TOKEN }}
           GL_REGISTRY: ${{ env.GL_REGISTRY }}
         run: |
           set -euo pipefail
@@ -194,7 +202,11 @@ jobs:
           if [[ -n "${GL_REGISTRY:-}" ]]; then
             GL_REG="${GL_REGISTRY}"
           else
-            [[ "${host}" == "gitlab.com" ]] && GL_REG="registry.gitlab.com" || GL_REG="registry.${host}"
+            if [[ "${host}" == "gitlab.com" ]]; then
+              GL_REG="registry.gitlab.com"
+            else
+              GL_REG="registry.${host}"
+            fi
           fi
 
           # Best-effort GitLab username (not strictly required for registry auth)
@@ -262,22 +274,20 @@ jobs:
           GH_OWNER:  ${{ env.GH_OWNER }}
           GH_REPO:   ${{ steps.repo.outputs.gh_repo }}
           DRY_RUN:   ${{ env.DRY_RUN }}
-          GL_PROJECT: ${{ matrix.project }}
+          GL_PROJECT:${{ matrix.project }}
         run: |
           set -euo pipefail
           json="${REPO_LIST}"
           count="$(jq 'length' <<< "${json}")"
           echo "Processing ${count} container repo(s)..."
-
           declare -A TOUCHED=()
           declare -A LOGGED=()
-
           try_login() { local d="$1" u="$2" p="$3"; skopeo login "$d" --username "$u" --password-stdin <<< "$p"; }
 
           for i in $(seq 0 $((count-1))); do
             obj="$(jq -c ".[$i]" <<< "${json}")"
             loc="$(jq -r '.location // empty' <<< "${obj}")"
-            path="$(jq -r '.path // empty'     <<< "${obj}")"
+            path="$(jq -r '.path // empty' <<< "${obj}")"
 
             if [[ -n "${loc}" ]]; then
               reg_domain="${loc%%/*}"
@@ -324,14 +334,13 @@ jobs:
 
             dest_path="${GH_OWNER}/${GH_REPO}"
             [[ -n "${suffix}" ]] && dest_path="${dest_path}/${suffix}"
-
-            echo "→ ${reg_domain}/${reg_path}  ==>  ghcr.io/${dest_path}  (${tcount} tag(s))"
+            echo "→ ${reg_domain}/${reg_path} ==> ghcr.io/${dest_path} (${tcount} tag(s))"
 
             # Login to GitLab registry once per domain (with fallbacks)
             if [[ -z "${LOGGED[${reg_domain}]:-}" ]]; then
               if try_login "${reg_domain}" "${GL_USER}" "${GL_TOKEN}" \
-                 || try_login "${reg_domain}" "oauth2" "${GL_TOKEN}" \
-                 || try_login "${reg_domain}" "gitlab-ci-token" "${GL_TOKEN}"; then
+                || try_login "${reg_domain}" "oauth2" "${GL_TOKEN}" \
+                || try_login "${reg_domain}" "gitlab-ci-token" "${GL_TOKEN}"; then
                 LOGGED["${reg_domain}"]=1
               else
                 echo "::warning::Login failed for ${reg_domain}; copies may fail."
@@ -399,9 +408,11 @@ jobs:
           mapfile -t names < <(jq -r '.[]' <<< "${PKG_NAMES}")
           for n in "${names[@]}"; do
             echo "Setting visibility=public for container package: ${n}"
-            gh api -X PATCH -H "Accept: application/vnd.github+json" \
+            if ! gh api -X PATCH -H "Accept: application/vnd.github+json" \
               "/orgs/${GH_OWNER}/packages/container/${n}/visibility" \
-              -f visibility=public || echo "::warning::Failed to set visibility for ${n}"
+              -f visibility=public; then
+              echo "::warning::Failed to set visibility for ${n}"
+            fi
           done
 
       - name: Summary
