@@ -1835,309 +1835,288 @@ jobs:
           path: vars-report.json
           compression-level: 6
 
-  package_registry_migration_ghcr_all:
-    name: "10) Package Registry · Container images (GitLab → GHCR) (ALL projects)"
-    needs: [discover_projects, repo_migration_commit_sync_all]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-    env:
-      # Tokens
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:   ${{ secrets.GH_PAT }}
+package_registry_migration_ghcr_all:
+  name: "10) Package Registry · Container images (GitLab → GHCR) (ALL projects) — FIXED"
+  needs: [discover_projects, repo_migration_commit_sync_all]
+  runs-on: ubuntu-latest
+  strategy:
+    fail-fast: false
+    max-parallel: 2
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+  env:
+    # Tokens
+    GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+    GH_PAT: ${{ secrets.GH_PAT }}
 
-      # Instances / naming (already defined in your workflow vars)
-      GL_URL:  ${{ vars.GL_URL }}
-      GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+    # Instances / naming
+    GL_URL: ${{ vars.GL_URL }}
+    GH_OWNER: ${{ vars.GH_OWNER }}
+    REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
+    GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
+    GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
 
-      # Optional for self-managed registry domains (e.g., registry.example.com)
-      GL_REGISTRY: ${{ vars.GL_REGISTRY }}
+    # Optional, for self-managed registry domain override (e.g., registry.example.com)
+    GL_REGISTRY: ${{ vars.GL_REGISTRY }}
 
-      # Controls
-      DRY_RUN: "false"       # set "true" to preview without copying
-      MAKE_PUBLIC: ${{ vars.MAKE_PUBLIC }}  # set "true" to flip GHCR packages to public after copy
+    # Controls
+    DRY_RUN: "false"       # set "true" to preview
+    MAKE_PUBLIC: ${{ vars.MAKE_PUBLIC }}  # "true" to flip GHCR packages to public
 
-    steps:
-      - name: Install jq, curl, gh, skopeo
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl skopeo gnupg software-properties-common
-          if ! command -v gh >/dev/null 2>&1; then
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
-              sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
-              sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-            sudo apt-get update -y && sudo apt-get install -y gh
-          fi
-          gh --version
-          skopeo --version
+    # Optional hint: set GL_REGISTRY_USER if your GL token can't hit /user
+    GL_REGISTRY_USER: ${{ vars.GL_REGISTRY_USER }}
+  steps:
+    - name: Install jq, curl, gh, skopeo
+      run: |
+        set -euo pipefail
+        sudo apt-get update -y
+        sudo apt-get install -y jq curl skopeo gnupg software-properties-common
+        if ! command -v gh >/dev/null 2>&1; then
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+          sudo apt-get update -y && sudo apt-get install -y gh
+        fi
+        gh --version
+        skopeo --version
 
-      - name: Authenticate gh (for GHCR)
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          set -euo pipefail
-          echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
-          gh auth status
+    - name: Resolve GitHub/GitLab identities
+      id: ids
+      env:
+        GL_PROJECT: ${{ matrix.project }}
+      run: |
+        set -euo pipefail
+        # GH user for GHCR
+        GH_USER="$(gh api user --jq .login)"
+        echo "gh_user=$GH_USER" >> "$GITHUB_OUTPUT"
 
-      - name: Compute destination repo name
-        id: repo
-        env:
-          GL_PROJECT: ${{ matrix.project }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          MODE="${REPO_NAME_MODE:-path}"
-          SEP="${GH_REPO_SEPARATOR:-"-"}"
-          PREF="${GH_REPO_PREFIX:-""}"
-          if [[ "${MODE}" == "fullpath" ]]; then
-            base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
-          else
-            base="${GL_PROJECT##*/}"
-          fi
-          GH_REPO="${PREF}${base}"
-          echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
-          echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
+        # GitLab API base + project enc
+        GL_API="${GL_URL%/}/api/v4"
+        GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
+        echo "gl_api=$GL_API" >> "$GITHUB_OUTPUT"
+        echo "gl_enc=$GL_ENC" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare APIs & identities
-        id: ids
-        env:
-          GL_PROJECT: ${{ matrix.project }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          GL_API="${GL_URL%/}/api/v4"
-          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
-
-          # GitHub user for GHCR auth
-          GH_USER="$(gh api user --jq .login)"
-          : "${GH_USER:?Failed to resolve GitHub user}"
-
-          # GitLab user (best-effort; may not be strictly needed for registry auth)
+        # GitLab registry username: prefer explicit override; else /user
+        if [ -n "${GL_REGISTRY_USER:-}" ]; then
+          echo "gl_user=${GL_REGISTRY_USER}" >> "$GITHUB_OUTPUT"
+        else
+          # Needs token with 'api' scope to resolve username
           GL_USER="$(curl -s --header "PRIVATE-TOKEN: ${GL_TOKEN}" "${GL_API}/user" | jq -r '.username // empty')"
-          [[ -z "${GL_USER}" || "${GL_USER}" == "null" ]] && GL_USER="oauth2"
+          [ -z "$GL_USER" ] && GL_USER="gitlab-ci-token"
+          echo "gl_user=$GL_USER" >> "$GITHUB_OUTPUT"
+        fi
 
-          echo "gl_api=${GL_API}"   >> "$GITHUB_OUTPUT"
-          echo "gl_enc=${GL_ENC}"   >> "$GITHUB_OUTPUT"
-          echo "gh_user=${GH_USER}" >> "$GITHUB_OUTPUT"
-          echo "gl_user=${GL_USER}" >> "$GITHUB_OUTPUT"
+    - name: Compute GH repo from project path
+      id: repo
+      env:
+        GL_PROJECT: ${{ matrix.project }}
+      run: |
+        set -euo pipefail
+        MODE="${REPO_NAME_MODE:-path}"
+        SEP="${GH_REPO_SEPARATOR:-"-"}"
+        PREFIX="${GH_REPO_PREFIX:-""}"
+        if [[ "$MODE" == "fullpath" ]]; then
+          base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
+        else
+          base="${GL_PROJECT##*/}"
+        fi
+        GH_REPO="${PREFIX}${base}"
+        echo "gh_repo=$GH_REPO" >> "$GITHUB_OUTPUT"
+        echo "Computed GH_REPO=${GH_REPO} for GL_PROJECT=${GL_PROJECT}"
 
-      - name: Log in to GHCR for skopeo
-        shell: bash
-        env:
-          GH_USER: ${{ steps.ids.outputs.gh_user }}
-        run: |
-          set -euo pipefail
-          skopeo login ghcr.io --username "${GH_USER}" --password-stdin <<< "${GH_PAT}"
+    - name: Discover GitLab container repositories (project + group)
+      id: gl_repos
+      env:
+        GL_PROJECT: ${{ matrix.project }}
+        GL_API: ${{ steps.ids.outputs.gl_api }}
+        GL_ENC: ${{ steps.ids.outputs.gl_enc }}
+      run: |
+        set -euo pipefail
+        # Aggregate from project-level and group-level
+        results="[]"
 
-      - name: Discover GitLab container repositories (project-level)
-        id: gl_repos
-        shell: bash
-        env:
-          GL_API: ${{ steps.ids.outputs.gl_api }}
-          GL_ENC: ${{ steps.ids.outputs.gl_enc }}
-        run: |
-          set -euo pipefail
+        # 1) Project-level: /projects/:id/registry/repositories
+        page=1
+        while :; do
+          RESP="$(mktemp)"; HDR="$(mktemp)"
+          HTTP=$(curl -sS -D "$HDR" -w '%{http_code}' \
+            -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+            "${GL_API}/projects/${GL_ENC}/registry/repositories?per_page=100&page=${page}" \
+            -o "$RESP")
+          if [[ "$HTTP" == "200" && "$(jq -r 'type' "$RESP")" == "array" ]]; then
+            results="$(jq -c --argjson acc "$results" --argjson cur "$(cat "$RESP")" '($acc + $cur)')"
+          fi
+          next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+          [[ -z "${next:-}" || "$next" == "0" ]] && break
+          page="$next"
+        done
+
+        # 2) Group-level: /groups/:id/registry/repositories  (if we can infer group from project)
+        GROUP_PATH="${GL_PROJECT%/*}"
+        if [[ -n "$GROUP_PATH" && "$GROUP_PATH" != "$GL_PROJECT" ]]; then
+          GENC="$(jq -rn --arg x "$GROUP_PATH" '$x|@uri')"
           page=1
-          repos="[]"
           while :; do
             RESP="$(mktemp)"; HDR="$(mktemp)"
             HTTP=$(curl -sS -D "$HDR" -w '%{http_code}' \
               -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/projects/${GL_ENC}/registry/repositories?per_page=100&page=${page}" \
+              "${GL_API}/groups/${GENC}/registry/repositories?per_page=100&page=${page}" \
               -o "$RESP")
-            if [[ "${HTTP}" != "200" ]]; then
-              echo "::notice::No container repositories (HTTP ${HTTP})."
-              break
+            if [[ "$HTTP" == "200" && "$(jq -r 'type' "$RESP")" == "array" ]]; then
+              results="$(jq -c --argjson acc "$results" --argjson cur "$(cat "$RESP")" '($acc + $cur)')"
             fi
-            if [[ "$(jq -r 'type' "$RESP")" != "array" ]]; then
-              echo "::notice::Response not array for page ${page}."
-              break
-            fi
-            # Append
-            repos="$(jq -c --argjson acc "$repos" --argjson cur "$(cat "$RESP")" \
-              '($acc + $cur)' )"
-            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')"
-            [[ -z "${next:-}" || "${next}" == "0" ]] && break
-            page="${next}"
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+            [[ -z "${next:-}" || "$next" == "0" ]] && break
+            page="$next"
           done
-          echo "list=${repos}" >> "$GITHUB_OUTPUT"
-          echo "Found $(jq 'length' <<<"$repos") container repo(s) in GitLab project."
+        fi
 
-      - name: Copy all tags from GitLab registry → GHCR
-        if: ${{ steps.gl_repos.outputs.list != '[]' }}
-        shell: bash
-        env:
-          GL_PROJECT: ${{ matrix.project }}
-          GH_REPO:   ${{ steps.repo.outputs.gh_repo }}
-          GH_USER:   ${{ steps.ids.outputs.gh_user }}
-          GL_USER:   ${{ steps.ids.outputs.gl_user }}
-          REPO_LIST: ${{ steps.gl_repos.outputs.list }}
-        run: |
-          set -euo pipefail
+        # De-dup by repo id
+        results="$(jq -c 'unique_by(.id)' <<<"$results")"
+        echo "list=$results" >> "$GITHUB_OUTPUT"
+        echo "Found $(jq 'length' <<<"$results") container repo(s) in GitLab."
 
-          json="${REPO_LIST}"
-          count="$(jq 'length' <<<"$json")"
-          echo "Processing ${count} container repo(s)..."
+    - name: Copy ALL tags from GitLab → GHCR
+      id: copy_tags
+      if: ${{ steps.gl_repos.outputs.list != '[]' }}
+      env:
+        GL_PROJECT: ${{ matrix.project }}
+        GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+        GL_API: ${{ steps.ids.outputs.gl_api }}
+        GL_ENC: ${{ steps.ids.outputs.gl_enc }}
+        GH_USER: ${{ steps.ids.outputs.gh_user }}
+        GL_USER: ${{ steps.ids.outputs.gl_user }}
+      run: |
+        set -euo pipefail
+        json='${{ steps.gl_repos.outputs.list }}'
+        count="$(jq 'length' <<<"$json")"
+        echo "Processing $count container repo(s)..."
 
-          # Track which GHCR package names we touched (for optional visibility flip)
-          declare -A TOUCHED_PKG=()
+        declare -A TOUCHED=()
 
-          # Helper: resilient login to GitLab registry domain
-          try_login() {
-            local domain="$1" user="$2" pass="$3"
-            skopeo login "$domain" --username "$user" --password-stdin <<< "$pass"
-          }
-
-          # Login cache per domain
-          declare -A LOGGED_IN=()
-
-          for i in $(seq 0 $((count-1))); do
-            repo_obj="$(jq -c ".[$i]" <<<"$json")"
-            location="$(jq -r '.location // empty' <<<"$repo_obj")"
-            path="$(jq -r '.path // empty'      <<<"$repo_obj")"
-
-            # Determine registry domain and repo path
-            if [[ -n "$location" ]]; then
-              reg_domain="${location%%/*}"
-              reg_path="${location#*/}"
-            elif [[ -n "$path" ]]; then
-              if [[ -n "${GL_REGISTRY:-}" ]]; then
-                reg_domain="${GL_REGISTRY}"
-              else
-                host="${GL_URL#*://}"; host="${host%%/*}"
-                reg_domain=$([[ "$host" == "gitlab.com" ]] && echo "registry.gitlab.com" || echo "registry.${host}")
-              fi
-              reg_path="${path}"
+        # Utility: compute source registry domain/path
+        get_src_coords() {
+          local repo_obj="$1"
+          local location path reg_domain reg_path
+          location="$(jq -r '.location // empty' <<<"$repo_obj")"
+          path="$(jq -r '.path // empty' <<<"$repo_obj")"
+          if [[ -n "$location" ]]; then
+            reg_domain="${location%%/*}"
+            reg_path="${location#*/}"
+          elif [[ -n "$path" ]]; then
+            if [[ -n "${GL_REGISTRY:-}" ]]; then
+              reg_domain="$GL_REGISTRY"
             else
-              echo "::warning::Repo object missing location/path; skipping: ${repo_obj}"
-              continue
+              host="${GL_URL#*://}"; host="${host%%/*}"
+              if [[ "$host" == "gitlab.com" ]]; then reg_domain="registry.gitlab.com"; else reg_domain="registry.${host}"; fi
             fi
-
-            # List all tags for this container repo
-            repo_id="$(jq -r '.id' <<<"$repo_obj")"
-            tags="[]"; page=1
-            while :; do
-              RESP="$(mktemp)"; HDR="$(mktemp)"
-              if ! curl --fail-with-body -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-                   "${GL_URL%/}/api/v4/projects/${GL_ENC}/registry/repositories/${repo_id}/tags?per_page=100&page=${page}" > "$RESP"; then
-                echo "::warning::Failed to list tags for repo_id=${repo_id}; skipping."
-                break
-              fi
-              [[ "$(jq -r 'type' "$RESP")" == "array" ]] || break
-              tags="$(jq -c --argjson acc "$tags" --argjson cur "$(cat "$RESP")" \
-                      '($acc + $cur)')"
-              next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')"
-              [[ -z "${next:-}" || "${next}" == "0" ]] && break
-              page="${next}"
-            done
-
-            tag_count="$(jq 'length' <<<"$tags")"
-            if [[ "$tag_count" -eq 0 ]]; then
-              echo "::notice::No tags found for ${reg_domain}/${reg_path}; skipping."
-              continue
-            fi
-
-            # Map to GHCR path (preserve suffix beyond GL project path)
-            suffix="${reg_path#${GL_PROJECT}}"
-            if [[ "$suffix" == "$reg_path" ]]; then
-              proj_name="${GL_PROJECT##*/}"
-              suffix="/${reg_path#*${proj_name}}"
-            fi
-            suffix="${suffix#/}"  # normalize
-            dest_repo_path="${GH_OWNER}/${GH_REPO}"
-            [[ -n "${suffix}" ]] && dest_repo_path="${dest_repo_path}/${suffix}"
-
-            echo "→ ${reg_domain}/${reg_path}  ==>  ghcr.io/${dest_repo_path}  (${tag_count} tag(s))"
-
-            # Login to GitLab registry once per domain (with fallbacks)
-            if [[ -z "${LOGGED_IN[$reg_domain]:-}" ]]; then
-              if try_login "$reg_domain" "${GL_USER}" "${GL_TOKEN}" \
-                 || try_login "$reg_domain" "oauth2" "${GL_TOKEN}" \
-                 || try_login "$reg_domain" "gitlab-ci-token" "${GL_TOKEN}"; then
-                LOGGED_IN[$reg_domain]=1
-              else
-                echo "::warning::All login methods failed for ${reg_domain}; copies for this repo will likely fail."
-              fi
-            fi
-
-            # Copy each tag
-            for t in $(jq -r '.[].name' <<<"$tags"); do
-              SRC="docker://${reg_domain}/${reg_path}:${t}"
-              DEST="docker://ghcr.io/${dest_repo_path}:${t}"
-
-              if [[ "${DRY_RUN}" == "true" ]]; then
-                echo "DRY-RUN skopeo copy --all ${SRC}  ->  ${DEST}"
-                continue
-              fi
-
-              echo "Copying tag '${t}' ..."
-              if skopeo copy --all "${SRC}" "${DEST}"; then
-                # Record touched package name (path after owner/)
-                pkg_name="${dest_repo_path#${GH_OWNER}/}"
-                TOUCHED_PKG["$pkg_name"]=1
-              else
-                echo "::warning::skopeo copy failed for tag '${t}' (${SRC} -> ${DEST})"
-              fi
-            done
-          done
-
-          # Emit touched package names for later steps
-          {
-            for k in "${!TOUCHED_PKG[@]}"; do printf '%s\n' "$k"; done
-          } | jq -R . | jq -s -c . | sed 's/^/pkg_names=/' >> "$GITHUB_OUTPUT"
-
-      - name: Verify GHCR images & tags
-        if: always()
-        shell: bash
-        env:
-          PKG_NAMES: ${{ steps.copy_all_tags.outputs.pkg_names || steps.Copy_all_tags.outputs.pkg_names || '' }}
-        run: |
-          set -euo pipefail
-          echo "Listing container packages under org: ${GH_OWNER}"
-          gh api -H "Accept: application/vnd.github+json" \
-            "/orgs/${GH_OWNER}/packages?package_type=container" --paginate --jq '.[].name' || true
-
-          echo "Attempting tag listing via skopeo for touched packages..."
-          if [[ -n "${PKG_NAMES:-}" && "${PKG_NAMES}" != "[]" ]]; then
-            mapfile -t names < <(jq -r '.[]' <<< "${PKG_NAMES}")
-            for n in "${names[@]}"; do
-              echo "# ghcr.io/${GH_OWNER}/${n}"
-              skopeo list-tags "docker://ghcr.io/${GH_OWNER}/${n}" || true
-            done
+            reg_path="$path"
           else
-            echo "No package names captured (copy may have found no tags or DRY_RUN=true)."
+            echo "::warning::Missing location/path in repo object: $repo_obj" >&2
+            return 1
           fi
+          printf '%s %s' "$reg_domain" "$reg_path"
+        }
 
-      - name: (Optional) Make GHCR packages public
-        if: ${{ env.MAKE_PUBLIC == 'true' }}
-        shell: bash
-        env:
-          PKG_NAMES: ${{ steps.copy_all_tags.outputs.pkg_names || steps.Copy_all_tags.outputs.pkg_names || '' }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${PKG_NAMES:-}" || "${PKG_NAMES}" == "[]" ]]; then
-            echo "No packages to flip visibility for."
-            exit 0
-          fi
-          mapfile -t names < <(jq -r '.[]' <<< "${PKG_NAMES}")
-          for n in "${names[@]}"; do
-            echo "Setting visibility=public for container package: ${n}"
-            gh api -X PATCH -H "Accept: application/vnd.github+json" \
-              "/orgs/${GH_OWNER}/packages/container/${n}/visibility" \
-              -f visibility=public || echo "::warning::Failed to set visibility for ${n}"
+        # Loop repos
+        for i in $(seq 0 $((count-1))); do
+          repo_obj="$(jq -c ".[$i]" <<<"$json")"
+          read -r reg_domain reg_path <<<"$(get_src_coords "$repo_obj")" || continue
+
+          # List all tags
+          repo_id="$(jq -r '.id' <<<"$repo_obj")"
+          tags="[]"; page=1
+          while :; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            if ! curl --fail-with-body -s -D "$HDR" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                "${GL_API}/projects/${GL_ENC}/registry/repositories/${repo_id}/tags?per_page=100&page=${page}" > "$RESP"; then
+              echo "::warning::Failed to list tags for repo_id=${repo_id} (${reg_domain}/${reg_path})." >&2
+              break
+            fi
+            [[ "$(jq -r 'type' "$RESP")" == "array" ]] || break
+            tags="$(jq -c --argjson acc "$tags" --argjson cur "$(cat "$RESP")" '($acc + $cur)')"
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')
+            [[ -z "${next:-}" || "$next" == "0" ]] && break
+            page="$next"
           done
 
-      - name: Summary
-        if: always()
-        run: |
-          echo "Container image migration job finished for ${{ matrix.project }} (GL → GHCR)."
+          tag_count="$(jq 'length' <<<"$tags")"
+          if [[ "$tag_count" -eq 0 ]]; then
+            echo "::notice::No tags for ${reg_domain}/${reg_path}; skipping."
+            continue
+          fi
+
+          # Map to GHCR: ghcr.io/<GH_OWNER>/<GH_REPO>[/suffix]
+          suffix="${reg_path#${GL_PROJECT}}"
+          if [[ "$suffix" == "$reg_path" ]]; then
+            proj_name="${GL_PROJECT##*/}"
+            suffix="/${reg_path#*${proj_name}}"   # best-effort
+          fi
+          suffix="${suffix#/}"  # normalize
+          dest_repo_path="${GH_OWNER}/${GH_REPO}"
+          [[ -n "$suffix" ]] && dest_repo_path="${dest_repo_path}/${suffix}"
+
+          echo "→ ${reg_domain}/${reg_path}  ==>  ghcr.io/${dest_repo_path}  (${tag_count} tag(s))"
+
+          # Copy each tag (auth inline). Retries make network hiccups survivable.
+          while read -r t; do
+            SRC="docker://${reg_domain}/${reg_path}:${t}"
+            DEST="docker://ghcr.io/${dest_repo_path}:${t}"
+            if [[ "${DRY_RUN}" == "true" ]]; then
+              echo "DRY-RUN: skopeo copy --all --retry-times 3 --src-creds '${GL_USER}:${GL_TOKEN}' --dest-creds '${GH_USER}:${GH_PAT}' ${SRC} ${DEST}"
+              continue
+            fi
+            echo "Copying tag '${t}'..."
+            if skopeo copy --all --retry-times 3 \
+                 --src-creds "${GL_USER}:${GL_TOKEN}" \
+                 --dest-creds "${GH_USER}:${GH_PAT}" \
+                 "${SRC}" "${DEST}"; then
+              pkg_name="${dest_repo_path#${GH_OWNER}/}"
+              TOUCHED["$pkg_name"]=1
+            else
+              echo "::warning::skopeo copy failed for tag '${t}' (${SRC} -> ${DEST})"
+            fi
+          done < <(jq -r '.[].name' <<<"$tags")
+        done
+
+        # Emit touched package names as JSON output
+        {
+          for k in "${!TOUCHED[@]}"; do printf '%s\n' "$k"; done
+        } | jq -R . | jq -s -c . | sed 's/^/pkg_names=/' >> "$GITHUB_OUTPUT"
+
+    - name: Verify GHCR images & tags
+      if: always()
+      id: verify
+      env:
+        PKG_NAMES: ${{ steps.copy_tags.outputs.pkg_names }}
+      run: |
+        set -euo pipefail
+        echo "Listing container packages under org: ${GH_OWNER}"
+        gh api -H "Accept: application/vnd.github+json" \
+          "/orgs/${GH_OWNER}/packages?package_type=container" --paginate --jq '.[].name' || true
+
+        if [[ -n "${PKG_NAMES:-}" && "${PKG_NAMES}" != "[]" ]]; then
+          echo "Verifying touched packages via skopeo list-tags..."
+          mapfile -t names < <(jq -r '.[]' <<<"$PKG_NAMES")
+          for n in "${names[@]}"; do
+            echo "# ghcr.io/${GH_OWNER}/${n}"
+            skopeo list-tags "docker://ghcr.io/${GH_OWNER}/${n}" || true
+          done
+        else
+          echo "No package names captured (no tags discovered or DRY_RUN=true)."
+        fi
+
+    - name: (Optional) Make GHCR packages public
+      if: ${{ env.MAKE_PUBLIC == 'true' && steps.copy_tags.outputs.pkg_names != '[]' }}
+      env:
+        PKG_NAMES: ${{ steps.copy_tags.outputs.pkg_names }}
+      run: |
+        set -euo pipefail
+        mapfile -t names < <(jq -r '.[]' <<<"$PKG_NAMES")
+        for n in "${names[@]}"; do
+          echo "Setting visibility=public for container package: ${n}"
+          gh api -X PATCH -H "Accept: application/vnd.github+json" \
+            "/orgs/${GH_OWNER}/packages/container/${n}/visibility" \
+            -f visibility=public || echo "::warning::Failed to set visibility for ${n}"
+        done
