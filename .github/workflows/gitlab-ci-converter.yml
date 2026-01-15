@@ -178,9 +178,9 @@ jobs:
         id: ids
         shell: bash
         env:
-          GL_URL:    ${{ env.GL_URL }}
-          GL_PROJECT:${{ matrix.project }}
-          GL_TOKEN:  ${{ secrets.GITLAB_TOKEN }}
+          GL_URL:     ${{ env.GL_URL }}
+          GL_PROJECT: ${{ matrix.project }}   # <-- fixed: space after colon
+          GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
           GL_REGISTRY: ${{ env.GL_REGISTRY }}
         run: |
           set -euo pipefail
