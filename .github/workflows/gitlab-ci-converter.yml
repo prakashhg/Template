@@ -174,7 +174,7 @@ jobs:
           GL_URL:     ${{ env.GL_URL }}
           GL_PROJECT: ${{ matrix.project }}
           GL_TOKEN:   ${{ secrets.GITLAB_TOKEN }}
-          GL_REGISTRY:${{ env.GL_REGISTRY }}
+          GL_REGISTRY: ${{ env.GL_REGISTRY }}
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
