@@ -258,7 +258,7 @@ jobs:
           GH_OWNER:  ${{ env.GH_OWNER }}
           GH_REPO:   ${{ steps.repo.outputs.gh_repo }}
           DRY_RUN:   ${{ env.DRY_RUN }}
-          GL_PROJECT:${{ matrix.project }}
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
           json="${REPO_LIST}"
