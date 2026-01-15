@@ -387,15 +387,14 @@ jobs:
 
             echo "→ ${reg_domain}/${reg_path} ==> ghcr.io/${dest_path} (${tcount} tag(s))"
 
-            if [[ -z "${LOGGED[${reg_domain}]:-}" ]]; then
-              if  try_login "${reg_domain}" "${GL_USER}" "${GL_TOKEN}" \
-               || try_login "${reg_domain}" "oauth2" "${GL_TOKEN}" \
-               || try_login "${reg_domain}" "gitlab-ci-token" "${GL_TOKEN}"
-              then
-                LOGGED["${reg_domain}"]=1
-              else
-                echo "::warning::Login failed for ${reg_domain}; copies may fail."
-              fi
+            if [[ -z "${LOGGED[${reg_domain}]:-}" ]] && ! skopeo login "${reg_domain}" --username "${GL_USER}" --password-stdin <<< "${GL_TOKEN}"; then
+              if ! skopeo login "${reg_domain}" --username "oauth2" --password-stdin <<< "${GL_TOKEN}"; then
+                if ! skopeo login "${reg_domain}" --username "gitlab-ci-token" --password-stdin <<< "${GL_TOKEN}"; then
+                  echo "::warning::Login failed for ${reg_domain}; copies may fail."
+                else LOGGED["${reg_domain}"]=1; fi
+              else LOGGED["${reg_domain}"]=1; fi
+            else
+              LOGGED["${reg_domain}"]=1
             fi
 
             while IFS= read -r t; do
@@ -675,9 +674,13 @@ jobs:
                  ' "${pkg}" > "${pkg}.new"
               mv "${pkg}.new" "${pkg}"
 
-              # Write re-scoped tarball to the CURRENT working directory (fix path bug)
-              newtgz="${workroot}/${newname//@/}-reScoped-${v}.tgz"
+              # Write re-scoped tarball to CURRENT working directory with a safe filename (no '/')
+              safe_base="${newname#@}"       # remove leading '@' → owner/pkg
+              safe_base="${safe_base//\//-}" # replace '/' with '-' → owner-pkg
+              newtgz="${workroot}/${safe_base}-reScoped-${v}.tgz"
+
               tar -czf "${newtgz}" -C "${workdir}/package" .
+              [[ -f "${newtgz}" ]] || { echo "::error::Failed to build ${newtgz}"; exit 1; }
               tgz="${newtgz}"
 
               if ! NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gh" npm publish "${tgz}" --access public --ignore-scripts; then
