@@ -23,17 +23,17 @@ permissions:
 
 env:
   # Required
-  GL_URL: ${{ vars.GL_URL }}      # e.g. https://gitlab.example.com or https://gitlab.com
+  GL_URL: ${{ vars.GL_URL }}      # e.g. https://gitlab.com or https://gitlab.example.com
   GL_GROUP: ${{ vars.GL_GROUP }}  # GitLab top-level group path
   GH_OWNER: ${{ vars.GH_OWNER }}  # GitHub org/user
 
   # Optional behavior controls
   REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}          # "path" (default) or "fullpath"
   GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}          # e.g. "gl-"
-  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}    # used when REPO_NAME_MODE=fullpath (default "-")
+  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}    # when REPO_NAME_MODE=fullpath (default "-")
   GL_REGISTRY: ${{ vars.GL_REGISTRY }}                # override GitLab registry host if needed
   GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}              # npm scope (owner/org) without "@"
-  GHCR_USER: ${{ vars.GHCR_USER }}                    # optional, else uses github.actor
+  GHCR_USER: ${{ vars.GHCR_USER }}                    # optional; else uses github.actor
 
   CURL_FLAGS: --http1.1 --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
 
@@ -56,7 +56,7 @@ jobs:
           [[ -n "${GL_GROUP_VAR:-}" ]] || { echo "::error::Missing repo variable GL_GROUP"; exit 1; }
           [[ -n "${GH_OWNER_VAR:-}" ]] || { echo "::error::Missing repo variable GH_OWNER"; exit 1; }
 
-      - name: Install jq & curl (Ubuntu repo)
+      - name: Install jq & curl
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -126,7 +126,7 @@ jobs:
     env:
       DRY_RUN: ${{ github.event.inputs.dry_run }}
     steps:
-      - name: Install jq, curl, skopeo (Ubuntu repo)
+      - name: Install jq, curl, skopeo
         run: |
           set -euo pipefail
           sudo apt-get update -y
@@ -181,6 +181,7 @@ jobs:
           host="${GL_URL#*://}"; host="${host##*@}"; host="${host%%/*}"
           if [[ -n "${GL_REGISTRY:-}" ]]; then GL_REG="${GL_REGISTRY}";
           else if [[ "${host}" == "gitlab.com" ]]; then GL_REG="registry.gitlab.com"; else GL_REG="registry.${host}"; fi; fi
+          # Try to resolve GitLab username for registry login (fall back to oauth2)
           GL_USER="$(curl -s ${CURL_FLAGS} -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
                    "${GL_API}/user" | jq -r '.username // empty')"
           [[ -z "${GL_USER}" || "${GL_USER}" == "null" ]] && GL_USER="oauth2"
@@ -227,11 +228,38 @@ jobs:
             [[ -z "${next:-}" || "${next}" == "0" ]] && break
             page="${next}"
           done
-          echo "list=${repos}" >> "$GITHUB_OUTPUT"
-          echo "Found $(jq 'length' <<< "${repos}") container repo(s) in GitLab project."
+
+          # Robust numeric count even if parsing fails
+          count="$(jq -r 'length' <<< "${repos:-[]}" 2>/dev/null || echo 0)"
+          # Emit BOTH: the JSON list and an integer count (to guard downstream steps)
+          printf 'list=%s\n' "${repos}" >> "$GITHUB_OUTPUT"
+          echo   "repo_count=${count}" >> "$GITHUB_OUTPUT"
+          echo "Found ${count} container repo(s) in GitLab project."
+
+      - name: Debug – show project registry status when none found
+        if: ${{ steps.gl_repos.outputs.repo_count == '0' }}
+        shell: bash
+        env:
+          GL_URL: ${{ env.GL_URL }}
+          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GL_ENC: ${{ steps.ids.outputs.gl_enc }}
+          CURL_FLAGS: ${{ env.CURL_FLAGS }}
+        run: |
+          set -euo pipefail
+          PROJ_JSON="$(mktemp)"
+          HTTP=$(curl -sS ${CURL_FLAGS} \
+            -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
+            -w '%{http_code}' "${GL_URL%/}/api/v4/projects/${GL_ENC}" -o "${PROJ_JSON}")
+          echo "Project GET HTTP: ${HTTP}"
+          if [[ "${HTTP}" == "200" ]]; then
+            echo "container_registry_enabled: $(jq -r '.container_registry_enabled // empty' "${PROJ_JSON}")"
+            echo "container_registry_access_level: $(jq -r '.container_registry_access_level // empty' "${PROJ_JSON}")"
+          fi
+          echo "First 500 bytes of repos API last response (if any):"
+          head -c 500 "${PROJ_JSON}" || true
 
       - name: Copy all tags from GitLab registry → GHCR
-        if: ${{ steps.gl_repos.outputs.list != '' && steps.gl_repos.outputs.list != '[]' }}
+        if: ${{ steps.gl_repos.outputs.repo_count != '0' }}
         id: copy
         shell: bash
         env:
@@ -250,8 +278,9 @@ jobs:
         run: |
           set -euo pipefail
           json="${REPO_LIST}"
-          count="$(jq 'length' <<< "${json}")"
+          count="$(jq -r 'length' <<< "${json:-[]}" 2>/dev/null || echo 0)"
           echo "Processing ${count} container repo(s)..."
+
           declare -A TOUCHED=() LOGGED=()
           try_login(){ local d="$1" u="$2" p="$3"; skopeo login "$d" --username "$u" --password-stdin <<< "$p"; }
 
@@ -261,7 +290,7 @@ jobs:
             path="$(jq -r '.path // empty'     <<< "${obj}")"
             if [[ -n "${loc}" ]]; then reg_domain="${loc%%/*}"; reg_path="${loc#*/}";
             elif [[ -n "${path}" ]]; then reg_domain="${GL_REG}"; reg_path="${path}";
-            else echo "::warning::Missing location/path; skipping"; continue; fi
+            else echo "::warning::Missing location/path; skipping: ${obj}"; continue; fi
 
             repo_id="$(jq -r '.id' <<< "${obj}")"
             tags="[]"; page=1
@@ -276,7 +305,7 @@ jobs:
                 break
               fi
               if [[ "$(jq -r 'type' "${RESP}")" != "array" ]]; then
-                echo "::warning::Tags response not array for repo_id=${repo_id}; stopping pagination."
+                echo "::warning::Tags response not array for repo_id=${repo_id}; stopping tag pagination."
                 break
               fi
               tags="$(jq -c --argjson acc "${tags}" --argjson cur "$(cat "${RESP}")" '($acc + $cur)')"
@@ -285,7 +314,7 @@ jobs:
               page="${next}"
             done
 
-            tcount="$(jq 'length' <<< "${tags}")"
+            tcount="$(jq -r 'length' <<< "${tags:-[]}" 2>/dev/null || echo 0)"
             if [[ "${tcount}" -eq 0 ]]; then
               echo "::notice::No tags found for ${reg_domain}/${reg_path}; skipping."
               continue
@@ -297,6 +326,7 @@ jobs:
               suffix="/${reg_path#*${proj_name}}"
             fi
             suffix="${suffix#/}"
+
             dest_path="${GH_OWNER}/${GH_REPO}"; [[ -n "${suffix}" ]] && dest_path="${dest_path}/${suffix}"
             echo "→ ${reg_domain}/${reg_path} ==> ${GHCR_HOST}/${dest_path} (${tcount} tag(s))"
 
@@ -337,24 +367,15 @@ jobs:
           API: ${{ github.api_url }}
         run: |
           set -euo pipefail
-          # Best-effort: GitHub's public API for changing container package visibility has varied.
-          # We attempt for ORG and USER scopes; if unsupported, we print a notice.  [5](https://docs.github.com/en/rest/packages)[6](https://github.com/orgs/community/discussions/55094)
           mapfile -t names < <(jq -r '.[]' <<< "${PKG_NAMES}")
           for n in "${names[@]}"; do
             echo "Attempt PUBLIC visibility for: ${n}"
-            # Try organization-scoped
-            curl -fsS -X PATCH \
-              -H "Authorization: Bearer ${GH_PAT}" \
-              -H "Accept: application/vnd.github+json" \
-              "${API}/orgs/${GH_OWNER}/packages/container/${n}" \
-              -d '{"visibility":"public"}' \
+            # Try organization-scoped; fallback to user-scoped if needed.
+            curl -fsS -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+              "${API}/orgs/${GH_OWNER}/packages/container/${n}" -d '{"visibility":"public"}' \
               && { echo "Org package set to public: ${n}"; continue; } || true
-            # Try user-scoped
-            curl -fsS -X PATCH \
-              -H "Authorization: Bearer ${GH_PAT}" \
-              -H "Accept: application/vnd.github+json" \
-              "${API}/users/${GH_OWNER}/packages/container/${n}" \
-              -d '{"visibility":"public"}' \
+            curl -fsS -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+              "${API}/users/${GH_OWNER}/packages/container/${n}" -d '{"visibility":"public"}' \
               && { echo "User package set to public: ${n}"; continue; } || true
             echo "::notice::Could not set visibility via API for ${n}. Use UI Package Settings if required."
           done
@@ -532,7 +553,7 @@ jobs:
               tar -xzf "${tgz}" -C "${workdir}"
               pkg="${workdir}/package/package.json"
               newname="@${GH_SCOPE}/$(basename "${src#*@}")"
-              repo_url="${{ github.server_url }}/$GITHUB_REPOSITORY_OWNER/${GH_REPO}.git"
+              repo_url="${{ github.server_url }}/${{ github.repository_owner }}/${GH_REPO}.git"
 
               jq --arg newname "${newname}" --arg repo "${repo_url}" '
                 .name = $newname
