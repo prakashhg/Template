@@ -24,12 +24,12 @@ env:
   # Optional behavior controls
   REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}          # "path" (default) or "fullpath"
   GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}          # e.g. "gl-"
-  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}    # used when REPO_NAME_MODE=fullpath (default "-")
+  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}    # when REPO_NAME_MODE=fullpath (default "-")
   GL_REGISTRY: ${{ vars.GL_REGISTRY }}                # optional GitLab registry override
   GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}              # npm scope (owner/org) without "@"
   GHCR_USER: ${{ vars.GHCR_USER }}                    # optional: PAT owner; defaults to github.actor
 
-  # Curl hardening (NO headers here to avoid word splitting)
+  # Curl hardening (NO headers here)
   CURL_FLAGS: --http1.1 --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
 
 jobs:
@@ -115,7 +115,6 @@ jobs:
               path=$(jq -r '.path_with_namespace // empty' <<<"${proj}")
               [[ -z "${path}" ]] && continue
 
-              # destination naming
               if [[ "${MODE}" == "fullpath" ]]; then
                 base="$(echo "${path}" | tr '/' "${SEP}")"
               else
@@ -123,7 +122,6 @@ jobs:
               fi
               dest="${PREF}${base}"
 
-              # optionally exclude deletion-scheduled
               if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
                 echo "Exclude (deletion-scheduled): ${dest} (GL: ${path})"
               else
@@ -214,7 +212,7 @@ jobs:
           GL_API="${GL_URL%/}/api/v4"
           GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
 
-          # FIX: avoid `gh api /user` (403). Use explicit GHCR_USER or fallback to actor.
+          # FIX: avoid `gh api /user`. Use explicit GHCR_USER or fallback to actor.
           GH_USER="${GHCR_USER:-${GITHUB_ACTOR}}"
           [[ -n "${GH_USER}" ]] || { echo "Failed to resolve GH username"; exit 1; }
 
@@ -425,28 +423,38 @@ jobs:
             for k in "${!TOUCHED[@]}"; do printf '%s\n' "$k"; done
           } | jq -R . | jq -s -c . | sed 's/^/pkg_names=/' >> "$GITHUB_OUTPUT"
 
-      - name: Verify GHCR images & tags (user-or-org safe)
+      - name: Verify GHCR images & tags (resilient)
         if: always()
         shell: bash
         env:
-          PKG_NAMES: ${{ steps.copy.outputs.pkg_names }}
           GH_OWNER: ${{ env.GH_OWNER }}
-          GH_TOKEN: ${{ github.token }}   # gh CLI needs this in Actions
+          PKG_NAMES: ${{ steps.copy.outputs.pkg_names }}
+          # Prefer GH_PAT (classic) for the Packages REST API; if absent, skip REST listing
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
-          echo "Listing container packages under owner: ${GH_OWNER}"
-          if gh api "/orgs/${GH_OWNER}" >/dev/null 2>&1; then
-            gh api -H "Accept: application/vnd.github+json" \
-              "/orgs/${GH_OWNER}/packages?package_type=container" \
-              --paginate --jq '.[].name' || true
+          echo "Verifying container packages for owner: ${GH_OWNER}"
+
+          # 1) Try REST listing with PAT (supports /orgs and /users packages endpoints)
+          if [[ -n "${GH_PAT:-}" ]]; then
+            echo "Listing via REST (PAT)..."
+            HDRS=(-H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" -H "Authorization: Bearer ${GH_PAT}")
+            if curl -fsS -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/orgs/${GH_OWNER} >/dev/null 2>&1; then
+              gh api "${HDRS[@]}" "/orgs/${GH_OWNER}/packages?package_type=container" --paginate --jq '.[].name' || true
+            else
+              gh api "${HDRS[@]}" "/users/${GH_OWNER}/packages?package_type=container" --paginate --jq '.[].name' || true
+            fi
           else
-            gh api -H "Accept: application/vnd.github+json" \
-              "/users/${GH_OWNER}/packages?package_type=container" \
-              --paginate --jq '.[].name' || true
+            echo "No GH_PAT; skipping REST listings and using registry-only checks."
           fi
 
+          # 2) Always attempt registry tag listing for touched packages
           echo "Attempting tag listing via skopeo for touched packages..."
           if [[ -n "${PKG_NAMES:-}" && "${PKG_NAMES}" != "[]" ]]; then
+            # Login to ghcr.io when PAT provided (needed for private packages)
+            if [[ -n "${GH_PAT:-}" ]]; then
+              echo "${GH_PAT}" | skopeo login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin || true
+            fi
             mapfile -t names < <(jq -r '.[]' <<< "${PKG_NAMES}")
             for n in "${names[@]}"; do
               echo "# ghcr.io/${GH_OWNER}/${n}"
@@ -476,8 +484,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          # Intentionally omit registry-url to avoid exposing external endpoints.
-          # We create a local .npmrc for publish/pull during the job.
+          # Intentionally omit registry-url; we create a local .npmrc during the job
 
       - name: Install jq
         run: sudo apt-get update -y && sudo apt-get install -y jq
@@ -534,16 +541,12 @@ jobs:
         run: |
           set -euo pipefail
           {
-            # Default registry for unscoped names → project endpoint
             echo "registry=${GL_NPM_URL}"
-            # Auth for project endpoint (tarballs & metadata)
             echo "//${GL_NPM_URL#https://}:_authToken=${GL_TOKEN}"
-            # Extra: auth for instance-level endpoint in case of redirects
             if [[ -n "${INST_HOST:-}" ]]; then
               echo "//${INST_HOST}/api/v4/packages/npm/:_authToken=${GL_TOKEN}"
             fi
             echo "always-auth=true"
-            # Map top-level group scope to the project endpoint (scoped names)
             if [[ -n "${GROUP_SCOPE:-}" ]]; then
               echo "@${GROUP_SCOPE}:registry=${GL_NPM_URL}"
             fi
@@ -620,8 +623,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Derive GitHub Packages host WITHOUT hard-coding in YAML:
-          # GitHub.com -> npm.pkg.github.com ; GHES -> npm.<hostname>
+          # Derive GH Packages host (GitHub.com or GHES) without hard-coding in YAML
           srv="${GITHUB_SERVER_URL#*://}"; srv="${srv%%/*}"
           if [[ "${srv}" == "github.com" ]]; then
             GH_PKG_HOST="npm.pkg.github.com"
@@ -629,11 +631,9 @@ jobs:
             GH_PKG_HOST="npm.${srv}"
           fi
 
-          # Scope must match GitHub owner/org
           GH_SCOPE="${GH_SCOPE:-${GH_OWNER}}"
           [[ -n "${GH_SCOPE}" ]] || { echo "::error::GH_NPM_SCOPE/GH_OWNER is empty"; exit 1; }
 
-          # Private .npmrc for publish (not logged)
           {
             echo "@${GH_SCOPE}:registry=https://${GH_PKG_HOST}"
             echo "//${GH_PKG_HOST}/:_authToken=${GH_PAT}"
@@ -662,7 +662,6 @@ jobs:
               newname="@${GH_SCOPE}/$(basename "${src#*@}")"
               repo_url="https://github.com/${GH_OWNER}/${GH_REPO}.git"
 
-              # Re-scope name + link repository only (no publishConfig.registry embedded)
               jq --arg newname "${newname}" --arg repo "${repo_url}" '
                 .name = $newname
                 | .publishConfig = (.publishConfig // {})
@@ -671,7 +670,6 @@ jobs:
               ' "${pkg}" > "${pkg}.new"
               mv "${pkg}.new" "${pkg}"
 
-              # Safe filename (no '/')
               safe_base="${newname#@}"
               safe_base="${safe_base//\//-}"
               newtgz="${workroot}/${safe_base}-reScoped-${v}.tgz"
@@ -692,7 +690,7 @@ jobs:
         shell: bash
         env:
           GH_OWNER: ${{ env.GH_OWNER }}
-          GH_TOKEN: ${{ github.token }}   # gh CLI needs this in Actions
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           echo "Listing npm packages under owner: ${GH_OWNER}"
