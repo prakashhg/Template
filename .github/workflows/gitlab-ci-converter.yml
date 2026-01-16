@@ -212,7 +212,7 @@ jobs:
           GL_API="${GL_URL%/}/api/v4"
           GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
 
-          # FIX: avoid `gh api /user`. Use explicit GHCR_USER or fallback to actor.
+          # Avoid `gh api /user`. Use explicit GHCR_USER or fallback to actor.
           GH_USER="${GHCR_USER:-${GITHUB_ACTOR}}"
           [[ -n "${GH_USER}" ]] || { echo "Failed to resolve GH username"; exit 1; }
 
@@ -423,35 +423,37 @@ jobs:
             for k in "${!TOUCHED[@]}"; do printf '%s\n' "$k"; done
           } | jq -R . | jq -s -c . | sed 's/^/pkg_names=/' >> "$GITHUB_OUTPUT"
 
-      - name: Verify GHCR images & tags (resilient)
+      - name: Verify GHCR images & tags (REST via PAT + registry checks)
         if: always()
         shell: bash
         env:
           GH_OWNER: ${{ env.GH_OWNER }}
           PKG_NAMES: ${{ steps.copy.outputs.pkg_names }}
-          # Prefer GH_PAT (classic) for the Packages REST API; if absent, skip REST listing
-          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_PAT: ${{ secrets.GH_PAT }}   # PAT recommended for REST packages endpoints
         run: |
           set -euo pipefail
           echo "Verifying container packages for owner: ${GH_OWNER}"
 
-          # 1) Try REST listing with PAT (supports /orgs and /users packages endpoints)
+          # 1) List owner/org packages via REST using PAT (most reliable)
           if [[ -n "${GH_PAT:-}" ]]; then
             echo "Listing via REST (PAT)..."
-            HDRS=(-H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" -H "Authorization: Bearer ${GH_PAT}")
-            if curl -fsS -H "Authorization: Bearer ${GH_PAT}" https://api.github.com/orgs/${GH_OWNER} >/dev/null 2>&1; then
-              gh api "${HDRS[@]}" "/orgs/${GH_OWNER}/packages?package_type=container" --paginate --jq '.[].name' || true
+            API="https://api.github.com"
+            # Is owner an org?
+            if curl -fsS -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+                 "${API}/orgs/${GH_OWNER}" >/dev/null 2>&1; then
+              curl -fsS -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+                   "${API}/orgs/${GH_OWNER}/packages?package_type=container" | jq -r '.[].name' || true
             else
-              gh api "${HDRS[@]}" "/users/${GH_OWNER}/packages?package_type=container" --paginate --jq '.[].name' || true
+              curl -fsS -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+                   "${API}/users/${GH_OWNER}/packages?package_type=container" | jq -r '.[].name' || true
             fi
           else
-            echo "No GH_PAT; skipping REST listings and using registry-only checks."
+            echo "No GH_PAT set; skipping REST listings. (Set a PAT with read:packages for owner-wide listing.)"
           fi
 
-          # 2) Always attempt registry tag listing for touched packages
+          # 2) Always try registry tag listing for touched packages
           echo "Attempting tag listing via skopeo for touched packages..."
           if [[ -n "${PKG_NAMES:-}" && "${PKG_NAMES}" != "[]" ]]; then
-            # Login to ghcr.io when PAT provided (needed for private packages)
             if [[ -n "${GH_PAT:-}" ]]; then
               echo "${GH_PAT}" | skopeo login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin || true
             fi
@@ -623,7 +625,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Derive GH Packages host (GitHub.com or GHES) without hard-coding in YAML
+          # Derive GH Packages host (GitHub.com or GHES)
           srv="${GITHUB_SERVER_URL#*://}"; srv="${srv%%/*}"
           if [[ "${srv}" == "github.com" ]]; then
             GH_PKG_HOST="npm.pkg.github.com"
