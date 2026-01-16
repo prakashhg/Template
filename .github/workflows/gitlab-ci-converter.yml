@@ -10,12 +10,6 @@ on:
         default: "false"
         type: choice
         options: ["false", "true"]
-      make_public:
-        description: "Attempt to set GHCR container packages to PUBLIC (best-effort)"
-        required: false
-        default: "true"
-        type: choice
-        options: ["true", "false"]
 
 permissions:
   contents: write
@@ -469,28 +463,6 @@ jobs:
           # Emit touched package names
           { for k in "${!TOUCHED[@]}"; do printf '%s\n' "$k"; done; } \
             | jq -R . | jq -s -c . | sed 's/^/pkg_names=/' >> "$GITHUB_OUTPUT"
-
-      - name: (Optional) Set GHCR packages visibility = PUBLIC
-        if: ${{ always() && steps.copy.outputs.pkg_names != '' && steps.copy.outputs.pkg_names != '[]' && github.event.inputs.make_public == 'true' }}
-        shell: bash
-        env:
-          PKG_NAMES: ${{ steps.copy.outputs.pkg_names }}
-          GH_OWNER: ${{ env.GH_OWNER }}
-          GH_PAT: ${{ secrets.GH_PAT }}
-          API: ${{ github.api_url }}
-        run: |
-          set -euo pipefail
-          mapfile -t names < <(jq -r '.[]' <<< "${PKG_NAMES}")
-          for n in "${names[@]}"; do
-            echo "Attempt PUBLIC visibility for: ${n}"
-            curl -fsS -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-              "${API}/orgs/${GH_OWNER}/packages/container/${n}" -d '{"visibility":"public"}' \
-              && { echo "Org package set to public: ${n}"; continue; } || true
-            curl -fsS -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-              "${API}/users/${GH_OWNER}/packages/container/${n}" -d '{"visibility":"public"}' \
-              && { echo "User package set to public: ${n}"; continue; } || true
-            echo "::notice::Could not set visibility via API for ${n}. Use UI Package Settings if required."
-          done
 
       - name: Summary (containers)
         if: always()
