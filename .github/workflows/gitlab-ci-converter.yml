@@ -229,34 +229,41 @@ jobs:
             page="${next}"
           done
 
-          # Robust numeric count even if parsing fails
+          # Robust numeric count
           count="$(jq -r 'length' <<< "${repos:-[]}" 2>/dev/null || echo 0)"
-          # Emit BOTH: the JSON list and an integer count (to guard downstream steps)
           printf 'list=%s\n' "${repos}" >> "$GITHUB_OUTPUT"
           echo   "repo_count=${count}" >> "$GITHUB_OUTPUT"
           echo "Found ${count} container repo(s) in GitLab project."
 
-      - name: Debug – show project registry status when none found
+      # >>> FIXED DEBUG: show the *repositories endpoint* body <<<
+      - name: Debug – project registry status & raw repos API (when none found)
         if: ${{ steps.gl_repos.outputs.repo_count == '0' }}
         shell: bash
         env:
           GL_URL: ${{ env.GL_URL }}
           GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GL_API: ${{ steps.ids.outputs.gl_api }}
           GL_ENC: ${{ steps.ids.outputs.gl_enc }}
           CURL_FLAGS: ${{ env.CURL_FLAGS }}
         run: |
           set -euo pipefail
           PROJ_JSON="$(mktemp)"
-          HTTP=$(curl -sS ${CURL_FLAGS} \
+          HTTP_P=$(curl -sS ${CURL_FLAGS} \
             -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
-            -w '%{http_code}' "${GL_URL%/}/api/v4/projects/${GL_ENC}" -o "${PROJ_JSON}")
-          echo "Project GET HTTP: ${HTTP}"
-          if [[ "${HTTP}" == "200" ]]; then
+            -w '%{http_code}' "${GL_API}/projects/${GL_ENC}" -o "${PROJ_JSON}")
+          echo "Project GET HTTP: ${HTTP_P}"
+          if [[ "${HTTP_P}" == "200" ]]; then
             echo "container_registry_enabled: $(jq -r '.container_registry_enabled // empty' "${PROJ_JSON}")"
             echo "container_registry_access_level: $(jq -r '.container_registry_access_level // empty' "${PROJ_JSON}")"
           fi
-          echo "First 500 bytes of repos API last response (if any):"
-          head -c 500 "${PROJ_JSON}" || true
+
+          REPOS_JSON="$(mktemp)"
+          HTTP_R=$(curl -sS ${CURL_FLAGS} \
+            -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
+            -w '%{http_code}' "${GL_API}/projects/${GL_ENC}/registry/repositories?per_page=100" -o "${REPOS_JSON}")
+          echo "Repos GET HTTP: ${HTTP_R}"
+          echo "First 500 bytes of repos API body:"
+          head -c 500 "${REPOS_JSON}" || true
 
       - name: Copy all tags from GitLab registry → GHCR
         if: ${{ steps.gl_repos.outputs.repo_count != '0' }}
@@ -370,7 +377,7 @@ jobs:
           mapfile -t names < <(jq -r '.[]' <<< "${PKG_NAMES}")
           for n in "${names[@]}"; do
             echo "Attempt PUBLIC visibility for: ${n}"
-            # Try organization-scoped; fallback to user-scoped if needed.
+            # Try organization-scoped; fallback to user-scoped.
             curl -fsS -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
               "${API}/orgs/${GH_OWNER}/packages/container/${n}" -d '{"visibility":"public"}' \
               && { echo "Org package set to public: ${n}"; continue; } || true
