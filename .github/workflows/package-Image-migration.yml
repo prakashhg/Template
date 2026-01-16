@@ -2,19 +2,13 @@
 name: "GitLab → GHCR/npm (org-internal, GHES-aware)"
 
 on:
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Do not copy, only print operations"
-        required: false
-        default: "false"
-        type: choice
-        options: ["false", "true"]
-
+  workflow_dispatch: {}
+  push:
+  delete:
+  
 permissions:
   contents: write
   packages: write
-
 env:
   # Required
   GL_URL: ${{ vars.GL_URL }}          # e.g. https://gitlab.com or https://gitlab.example.com
