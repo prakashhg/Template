@@ -27,6 +27,7 @@ env:
   GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}    # used when REPO_NAME_MODE=fullpath (default "-")
   GL_REGISTRY: ${{ vars.GL_REGISTRY }}                # optional GitLab registry override
   GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}              # npm scope (owner/org) without "@"
+  GHCR_USER: ${{ vars.GHCR_USER }}                    # optional: PAT owner; defaults to github.actor
 
   # Curl hardening (NO headers here to avoid word splitting)
   CURL_FLAGS: --http1.1 --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
@@ -207,14 +208,15 @@ jobs:
           GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
           GL_REGISTRY: ${{ env.GL_REGISTRY }}
           CURL_FLAGS: ${{ env.CURL_FLAGS }}
-          GH_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ env.GHCR_USER }}   # optional override; else uses github.actor
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
           GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
 
-          GH_USER="$(gh api user --jq .login)"
-          [[ -n "${GH_USER}" ]] || { echo "Failed to resolve GitHub user"; exit 1; }
+          # FIX: avoid `gh api /user` (403). Use explicit GHCR_USER or fallback to actor.
+          GH_USER="${GHCR_USER:-${GITHUB_ACTOR}}"
+          [[ -n "${GH_USER}" ]] || { echo "Failed to resolve GH username"; exit 1; }
 
           host="${GL_URL#*://}"; host="${host##*@}"; host="${host%%/*}"
           if [[ -n "${GL_REGISTRY:-}" ]]; then
@@ -227,6 +229,7 @@ jobs:
             fi
           fi
 
+          # Resolve GitLab username for skopeo logins (fallback to oauth2)
           GL_USER="$(curl -s ${CURL_FLAGS} \
                       -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
                       -H "Accept: application/json" \
@@ -428,7 +431,7 @@ jobs:
         env:
           PKG_NAMES: ${{ steps.copy.outputs.pkg_names }}
           GH_OWNER: ${{ env.GH_OWNER }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}   # gh CLI needs this in Actions
         run: |
           set -euo pipefail
           echo "Listing container packages under owner: ${GH_OWNER}"
@@ -473,11 +476,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          # NOTE: no `registry-url` here by design. We create a local .npmrc during the job.
-          # Ref: setup-node docs: registry-url is optional; if omitted, action doesn't write .npmrc
-          # and npm uses existing config (we write it later privately). 
-          # https: docs – Publishing Node.js packages / setup-node behavior
-          # (see citations in the answer)
+          # Intentionally omit registry-url to avoid exposing external endpoints.
+          # We create a local .npmrc for publish/pull during the job.
 
       - name: Install jq
         run: sudo apt-get update -y && sudo apt-get install -y jq
@@ -534,8 +534,9 @@ jobs:
         run: |
           set -euo pipefail
           {
-            # Default registry for unscoped names → project endpoint (GitLab)
+            # Default registry for unscoped names → project endpoint
             echo "registry=${GL_NPM_URL}"
+            # Auth for project endpoint (tarballs & metadata)
             echo "//${GL_NPM_URL#https://}:_authToken=${GL_TOKEN}"
             # Extra: auth for instance-level endpoint in case of redirects
             if [[ -n "${INST_HOST:-}" ]]; then
@@ -619,7 +620,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Determine GitHub Packages host WITHOUT hard-coding external URLs.
+          # Derive GitHub Packages host WITHOUT hard-coding in YAML:
           # GitHub.com -> npm.pkg.github.com ; GHES -> npm.<hostname>
           srv="${GITHUB_SERVER_URL#*://}"; srv="${srv%%/*}"
           if [[ "${srv}" == "github.com" ]]; then
@@ -627,11 +628,12 @@ jobs:
           else
             GH_PKG_HOST="npm.${srv}"
           fi
+
           # Scope must match GitHub owner/org
           GH_SCOPE="${GH_SCOPE:-${GH_OWNER}}"
           [[ -n "${GH_SCOPE}" ]] || { echo "::error::GH_NPM_SCOPE/GH_OWNER is empty"; exit 1; }
 
-          # Private .npmrc for publish (no logs)
+          # Private .npmrc for publish (not logged)
           {
             echo "@${GH_SCOPE}:registry=https://${GH_PKG_HOST}"
             echo "//${GH_PKG_HOST}/:_authToken=${GH_PAT}"
@@ -690,7 +692,7 @@ jobs:
         shell: bash
         env:
           GH_OWNER: ${{ env.GH_OWNER }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}   # gh CLI needs this in Actions
         run: |
           set -euo pipefail
           echo "Listing npm packages under owner: ${GH_OWNER}"
