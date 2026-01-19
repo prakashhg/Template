@@ -3,13 +3,6 @@ name: "Orchestrator"
 
 on:
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Do not copy/publish; only print"
-        required: false
-        default: "false"
-        type: choice
-        options: ["false", "true"]
 
 jobs:
   repo_migration:
