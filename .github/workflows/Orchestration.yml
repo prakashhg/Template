@@ -12,9 +12,29 @@ on:
         options: ["false", "true"]
 
 jobs:
-  run_migration:
+  repo_migration:
+    name: "Run repo migration (reusable)"
+    uses: ./.github/workflows/gitlab-ci-converter.yml
+    with:
+      gl_url:          ${{ vars.GL_URL }}
+      gl_group:        ${{ vars.GL_GROUP }}
+      gh_owner:        ${{ vars.GH_OWNER }}
+
+      repo_name_mode:  ${{ vars.REPO_NAME_MODE }}
+      gh_repo_prefix:  ${{ vars.GH_REPO_PREFIX }}
+      gh_repo_separator: ${{ vars.GH_REPO_SEPARATOR }}
+      gl_registry:     ${{ vars.GL_REGISTRY }}
+      gh_npm_scope:    ${{ vars.GH_NPM_SCOPE }}
+      ghcr_user:       ${{ vars.GHCR_USER }}
+      dry_run:         ${{ github.event.inputs.dry_run }}
+
+    secrets:
+      gitlab_token: ${{ secrets.GITLAB_TOKEN }}
+      gh_pat:       ${{ secrets.GH_PAT }}
+
+  package_migration:
     name: "Run container + npm migration (reusable)"
-    uses: ./.github/workflows/package-image-migration.yml
+    uses: ./.github/workflows/package-Image-migration.yml
     with:
       gl_url:          ${{ vars.GL_URL }}
       gl_group:        ${{ vars.GL_GROUP }}
