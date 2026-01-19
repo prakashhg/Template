@@ -22,7 +22,7 @@ jobs:
 
       repo_name_mode:  ${{ vars.REPO_NAME_MODE }}
       gh_repo_prefix:  ${{ vars.GH_REPO_PREFIX }}
-      gh_repo_separator:${{ vars.GH_REPO_SEPARATOR }}
+      gh_repo_separator: ${{ vars.GH_REPO_SEPARATOR }}
       gl_registry:     ${{ vars.GL_REGISTRY }}
       gh_npm_scope:    ${{ vars.GH_NPM_SCOPE }}
       ghcr_user:       ${{ vars.GHCR_USER }}
