@@ -2,9 +2,7 @@
 name: "GitLab → GHCR/npm (org-internal, GHES-aware)"
 
 on:
-  workflow_dispatch: {}
-  push:
-  delete:
+  workflow_call:
   
 permissions:
   contents: write
