@@ -2,9 +2,7 @@
 name: Mirroring (GitLab → GitHub) + Trackers migration [Group-wide]
 
 on:
-  workflow_dispatch: {}
-  push:
-  delete:
+  workflow_call:
 
 permissions:
   contents: write
