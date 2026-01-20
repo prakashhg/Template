@@ -2,26 +2,30 @@
 name: Mirroring (GitLab → GitHub) + Trackers migration [Group-wide]
 
 on:
-  workflow_call:
-  
+  workflow_dispatch: {}
+  push:
+  delete:
+
 permissions:
   contents: write
   issues: write
   pull-requests: write
 
+
 jobs:
-  # 1) Discover projects under the GitLab group (includes subgroups)
   discover_projects:
     name: "1) Discover GitLab projects for conversion"
     runs-on: ubuntu-latest
     outputs:
       project_list: ${{ steps.collect.outputs.project_list }}
     env:
+      # The called workflow reads secrets from its own context;
+      # these resolve only if the caller passed them (secrets: inherit)
       GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GL_URL:   ${{ vars.GL_URL }}
+      GL_URL: ${{ vars.GL_URL }}
       GL_GROUP: ${{ vars.GL_GROUP }}
-      REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
+      REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
+      GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
       GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
     steps:
       - name: Install jq & curl
@@ -33,51 +37,75 @@ jobs:
       - name: Collect & filter projects under GL_GROUP (exclude deletion-scheduled)
         id: collect
         shell: bash
+        env:
+          GL_TOKEN: ${{ env.GL_TOKEN }}
+          GL_URL:   ${{ env.GL_URL }}
+          GL_GROUP: ${{ env.GL_GROUP }}
+          REPO_NAME_MODE: ${{ env.REPO_NAME_MODE }}
+          GH_REPO_PREFIX: ${{ env.GH_REPO_PREFIX }}
+          GH_REPO_SEPARATOR: ${{ env.GH_REPO_SEPARATOR }}
         run: |
           set -euo pipefail
           : "${GL_URL:?GL_URL is required}"
           : "${GL_GROUP:?GL_GROUP is required}"
-          GL_API="${GL_URL%/}/api/v4"
-          GROUP_ENC=$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')
+          : "${GL_TOKEN:?Missing GL_TOKEN (caller must pass secrets to reusable workflow)}"
 
-          REPO_NAME_MODE="${REPO_NAME_MODE:-path}"
-          GH_REPO_PREFIX="${GH_REPO_PREFIX:-}"
-          SEP="${GH_REPO_SEPARATOR:-"-"}"
+          GL_API="${GL_URL%/}/api/v4"
+          GROUP_ENC="$(jq -rn --arg x "$GL_GROUP" '$x|@uri')"
+          MODE="${REPO_NAME_MODE:-path}"
+          PREF="${GH_REPO_PREFIX:-}"
+          SEP="${GH_REPO_SEPARATOR:--}"
 
           page=1
           filtered=()
-          while true; do
-            RESP=$(mktemp) ; HDR=$(mktemp)
-            curl -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-              "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" > "${RESP}"
+
+          while :; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            HTTP=$(
+              curl -sS -D "$HDR" -w '%{http_code}' \
+                   -H "PRIVATE-TOKEN: $GL_TOKEN" \
+                   -H "Accept: application/json" -H "Connection: close" \
+                   "$GL_API/groups/$GROUP_ENC/projects?per_page=100&page=$page&include_subgroups=true" \
+                   -o "$RESP"
+            )
+            if [[ "$HTTP" != "200" ]]; then
+              echo "::error::GitLab API HTTP $HTTP while listing projects for group '${GL_GROUP}'"
+              head -c 300 "$RESP" || true
+              exit 1
+            fi
+
+            if [[ "$(jq -r 'type' "$RESP" 2>/dev/null || echo unknown)" != "array" ]]; then
+              echo "::error::Unexpected response (not JSON array)."
+              head -c 300 "$RESP" || true
+              exit 1
+            fi
 
             while read -r proj; do
-              path=$(jq -r '.path_with_namespace' <<<"${proj}")
-              [[ -z "${path}" ]] && continue
+              path="$(jq -r '.path_with_namespace // empty' <<<"$proj")"
+              [[ -z "$path" ]] && continue
 
-              # Compute destination repo name
-              if [[ "${REPO_NAME_MODE}" == "fullpath" ]]; then
-                base="$(echo "${path}" | tr '/' "${SEP}")"
+              if [[ "$MODE" == "fullpath" ]]; then
+                base="$(echo "$path" | tr '/' "$SEP")"
               else
                 base="${path##*/}"
               fi
-              dest="${GH_REPO_PREFIX}${base}"
+              dest="${PREF}${base}"
 
-              # Exclude deletion-scheduled repos by name pattern
-              if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
-                echo "Exclude (deletion-scheduled): ${dest} (from GL: ${path})"
+              if [[ "$dest" == deletion_scheduled-* || "$dest" == *deletion_scheduled-* ]]; then
+                echo "Exclude (deletion-scheduled): $dest (from GL: $path)"
               else
-                filtered+=("${path}")
+                filtered+=("$path")
               fi
-            done < <(jq -c '.[]' "${RESP}")
+            done < <(jq -c '.[]' "$RESP")
 
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${next:-}" || "${next}" == "0" ]] && break
-            page="${next}"
+            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$HDR" | tr -d '\r')"
+            [[ -z "${next:-}" || "$next" == "0" ]] && break
+            page="$next"
           done
 
-          json=$(printf '%s\n' "${filtered[@]:-}" | jq -R . | jq -s -c .)
-          echo "project_list=${json}" >> "$GITHUB_OUTPUT"
+          json="$(printf '%s\n' "${filtered[@]:-}" | jq -R . | jq -s -c .)"
+          echo "project_list=$json" >> "$GITHUB_OUTPUT"
+          echo "Found $(jq 'length' <<<"$json") project(s)."
 
   # 2) Repo Migration · 1.1 Commit Sync — ALL projects
   repo_migration_commit_sync_all:
