@@ -2,7 +2,22 @@
 name: "Orchestrator"
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
+  push:
+  delete:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+  GL_URL:   ${{ vars.GL_URL }}
+  GL_GROUP: ${{ vars.GL_GROUP }}
+  REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}
+  GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
+  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
 
 
 jobs:
