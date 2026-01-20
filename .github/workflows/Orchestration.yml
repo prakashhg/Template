@@ -1,4 +1,5 @@
 
+# .github/workflows/Orchestration.yml
 name: "Orchestrator"
 
 on:
@@ -11,22 +12,15 @@ permissions:
   issues: write
   pull-requests: write
 
-env:
-  GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-  GL_URL:   ${{ vars.GL_URL }}
-  GL_GROUP: ${{ vars.GL_GROUP }}
-  REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}
-  GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
-  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-
 
 jobs:
   repo_migration:
     name: "Run repo migration (reusable)"
     uses: ./.github/workflows/gitlab-ci-converter.yml
 
-
   package_migration:
     name: "Run container + npm migration (reusable)"
+    permissions:
+      contents: write
+      packages: write  
     uses: ./.github/workflows/package-Image-migration.yml
-
