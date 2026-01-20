@@ -1,5 +1,5 @@
 
-name: "GitLab → GHCR / npm (org-internal, GHES-aware)"
+name: "GitLab → GHCR/npm (org-internal, GHES-aware)"
 
 on:
   workflow_call:
@@ -9,159 +9,593 @@ permissions:
   packages: write
 
 env:
-  GL_URL: ${{ vars.GL_URL }}
-  GL_GROUP: ${{ vars.GL_GROUP }}
-  GH_OWNER: ${{ vars.GH_OWNER }}
+  # Required org parameters
+  GL_URL: ${{ vars.GL_URL }}      # e.g. https://gitlab.com or https://gitlab.example.com
+  GL_GROUP: ${{ vars.GL_GROUP }}  # GitLab top-level group path (org)
+  GH_OWNER: ${{ vars.GH_OWNER }}  # GitHub org (or user)
 
-  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}
-  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}
-  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
+  # Optional behavior controls
+  REPO_NAME_MODE: ${{ vars.REPO_NAME_MODE }}       # "path" (default) or "fullpath"
+  GH_REPO_PREFIX: ${{ vars.GH_REPO_PREFIX }}       # e.g. "gl-"
+  GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }} # used when REPO_NAME_MODE=fullpath, default "-"
 
-  GL_REGISTRY: ${{ vars.GL_REGISTRY }}
-  GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}
-  GHCR_USER: ${{ vars.GHCR_USER }}
+  GL_REGISTRY: ${{ vars.GL_REGISTRY }}             # override GitLab registry host if needed
+  GH_NPM_SCOPE: ${{ vars.GH_NPM_SCOPE }}           # npm scope (owner/org) without "@"
+  GHCR_USER: ${{ vars.GHCR_USER }}                 # optional; else uses github.actor
 
+  # curl defaults (safe, retrying, no verbose dumps)
   CURL_FLAGS: --http1.1 --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120
 
 jobs:
-# ------------------------------------------------------------
-# 1) DISCOVER PROJECTS
-# ------------------------------------------------------------
   discover_projects:
+    name: "1) Discover GitLab projects for migration"
     runs-on: ubuntu-latest
     outputs:
       project_list: ${{ steps.collect.outputs.project_list }}
     steps:
-      - name: Install jq & curl
-        run: sudo apt-get update && sudo apt-get install -y jq curl
-
-      - id: collect
+      - name: Validate required variables
         shell: bash
         env:
+          GL_URL_VAR: ${{ env.GL_URL }}
+          GL_GROUP_VAR: ${{ env.GL_GROUP }}
+          GH_OWNER_VAR: ${{ env.GH_OWNER }}
+        run: |
+          set -euo pipefail
+          [[ -n "${GL_URL_VAR:-}"    ]] || { echo "::error::Missing repo variable GL_URL";    exit 1; }
+          [[ -n "${GL_GROUP_VAR:-}"  ]] || { echo "::error::Missing repo variable GL_GROUP";  exit 1; }
+          [[ -n "${GH_OWNER_VAR:-}"  ]] || { echo "::error::Missing repo variable GH_OWNER";  exit 1; }
+
+      - name: Install jq & curl
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
+
+      - name: Collect projects under GL_GROUP (recursive)
+        id: collect
+        shell: bash
+        env:
+          GL_URL: ${{ env.GL_URL }}
+          GL_GROUP: ${{ env.GL_GROUP }}
           GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          REPO_NAME_MODE: ${{ env.REPO_NAME_MODE }}
+          GH_REPO_PREFIX: ${{ env.GH_REPO_PREFIX }}
+          GH_REPO_SEPARATOR: ${{ env.GH_REPO_SEPARATOR }}
+          CURL_FLAGS: ${{ env.CURL_FLAGS }}
         run: |
           set -euo pipefail
           GL_API="${GL_URL%/}/api/v4"
-          GROUP_ENC="$(jq -rn --arg x "$GL_GROUP" '$x|@uri')"
+          GROUP_ENC="$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')"
+          MODE="${REPO_NAME_MODE:-path}"
+          PREF="${GH_REPO_PREFIX:-}"
+          SEP="${GH_REPO_SEPARATOR:--}"
 
           page=1
-          projects=()
+          filtered=()
+          while true; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            HTTP=$(curl -sS ${CURL_FLAGS} \
+              -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
+              -D "${HDR}" -w '%{http_code}' \
+              "${GL_API}/groups/${GROUP_ENC}/projects?per_page=100&page=${page}&include_subgroups=true" \
+              -o "${RESP}") || { echo "::error::Failed listing group projects"; exit 1; }
+            [[ "${HTTP}" == "200" ]] || { echo "::error::GitLab API HTTP ${HTTP}"; exit 1; }
+            [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "::error::Expected array"; exit 1; }
 
-          while :; do
-            resp="$(mktemp)"
-            hdr="$(mktemp)"
+            while read -r proj; do
+              path=$(jq -r '.path_with_namespace // empty' <<<"${proj}")
+              [[ -z "${path}" ]] && continue
+              # Exclude GitLab's deletion-scheduled repos
+              if [[ "${MODE}" == "fullpath" ]]; then
+                base="${path//\//${SEP}}"
+              else
+                base="${path##*/}"
+              fi
+              dest="${PREF}${base}"
+              if [[ "${dest}" == deletion_scheduled-* || "${dest}" == *deletion_scheduled-* ]]; then
+                continue
+              fi
+              filtered+=("${path}")
+            done < <(jq -c '.[]' "${RESP}")
 
-            code=$(curl -sS $CURL_FLAGS \
-              -H "PRIVATE-TOKEN: $GL_TOKEN" \
-              -D "$hdr" -w '%{http_code}' \
-              "$GL_API/groups/$GROUP_ENC/projects?per_page=100&page=$page&include_subgroups=true" \
-              -o "$resp")
-
-            [[ "$code" == "200" ]] || break
-
-            while read -r p; do
-              path="$(jq -r '.path_with_namespace' <<< "$p")"
-              projects+=("$path")
-            done < <(jq -c '.[]' "$resp")
-
-            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "$hdr" | tr -d '\r')"
-            [[ -z "$next" || "$next" == "0" ]] && break
-            page="$next"
+            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
+            page="${next}"
           done
 
-          printf '%s\n' "${projects[@]}" | jq -R . | jq -s -c . > projects.json
-          echo "project_list=$(cat projects.json)" >> "$GITHUB_OUTPUT"
+          json=$(printf '%s\n' "${filtered[@]:-}" | jq -R . | jq -s -c .)
+          echo "project_list=${json}" >> "$GITHUB_OUTPUT"
+          echo "Found $(jq 'length' <<<"${json}") project(s)."
 
-# ------------------------------------------------------------
-# 2) CONTAINER IMAGE MIGRATION (FIXED)
-# ------------------------------------------------------------
-  ghcr_images:
-    needs: discover_projects
+  package_registry_migration_ghcr_all:
+    name: "2) Container images (GitLab → GHCR) — ALL projects"
+    needs: [discover_projects]
+    if: needs.discover_projects.outputs.project_list != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-
+    env:
+      DRY_RUN: ${{ github.event.inputs.dry_run }}
     steps:
-      - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y jq curl skopeo
+      - name: Install jq, curl, skopeo
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl skopeo
 
-      - name: Login GHCR
+      - name: Compute GH hosts (GHES-aware)
+        id: hosts
+        shell: bash
+        env:
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          srv="${GITHUB_SERVER_URL#*://}"; srv="${srv%%/*}"
+          if [[ "${srv}" == "github.com" ]]; then
+            echo "ghcr_host=ghcr.io" >> "$GITHUB_OUTPUT"
+          else
+            echo "ghcr_host=ghcr.${srv}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute destination repo name
+        id: repo
+        shell: bash
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+          REPO_NAME_MODE: ${{ env.REPO_NAME_MODE }}
+          GH_REPO_PREFIX: ${{ env.GH_REPO_PREFIX }}
+          GH_REPO_SEPARATOR: ${{ env.GH_REPO_SEPARATOR }}
+        run: |
+          set -euo pipefail
+          MODE="${REPO_NAME_MODE:-path}"
+          SEP="${GH_REPO_SEPARATOR:--}"
+          PREF="${GH_REPO_PREFIX:-}"
+          if [[ "${MODE}" == "fullpath" ]]; then
+            base="${GL_PROJECT//\//${SEP}}"
+          else
+            base="${GL_PROJECT##*/}"
+          fi
+          echo "gh_repo=${PREF}${base}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare APIs & identities
+        id: ids
+        shell: bash
+        env:
+          GL_URL: ${{ env.GL_URL }}
+          GL_GROUP: ${{ env.GL_GROUP }}
+          GL_PROJECT: ${{ matrix.project }}
+          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GL_REGISTRY: ${{ env.GL_REGISTRY }}
+          CURL_FLAGS: ${{ env.CURL_FLAGS }}
+          GHCR_USER: ${{ env.GHCR_USER }}
+        run: |
+          set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          GL_ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
+          GL_GROUP_ENC="$(jq -rn --arg x "${GL_GROUP}" '$x|@uri')"
+          GH_USER="${GHCR_USER:-${GITHUB_ACTOR}}"
+          [[ -n "${GH_USER}" ]] || { echo "Failed to resolve GH username"; exit 1; }
+
+          host="${GL_URL#*://}"; host="${host#*@}"; host="${host%%/*}"
+          if [[ -n "${GL_REGISTRY:-}" ]]; then
+            GL_REG="${GL_REGISTRY}"
+          else
+            if [[ "${host}" == "gitlab.com" ]]; then
+              GL_REG="registry.gitlab.com"
+            else
+              GL_REG="registry.${host}"
+            fi
+          fi
+
+          GL_USER="$(curl -s ${CURL_FLAGS} -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
+            "${GL_API}/user" | jq -r '.username // empty')"
+          [[ -z "${GL_USER}" || "${GL_USER}" == "null" ]] && GL_USER="oauth2"
+
+          {
+            echo "gl_api=${GL_API}"
+            echo "gl_enc=${GL_ENC}"
+            echo "gl_group_enc=${GL_GROUP_ENC}"
+            echo "gl_reg=${GL_REG}"
+            echo "gh_user=${GH_USER}"
+            echo "gl_user=${GL_USER}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR for skopeo
+        shell: bash
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
-          GH_USER: ${{ env.GHCR_USER || github.actor }}
+          GH_USER: ${{ steps.ids.outputs.gh_user }}
+          GHCR_HOST: ${{ steps.hosts.outputs.ghcr_host }}
         run: |
-          set -e
-          skopeo logout ghcr.io || true
-          skopeo login ghcr.io --username "$GH_USER" --password-stdin <<< "$GH_PAT"
+          set -euo pipefail
+          skopeo login "${GHCR_HOST}" --username "${GH_USER}" --password-stdin <<< "${GH_PAT}"
 
-      - name: Copy images (FORCE SIZE FIX)
+      - name: Discover GitLab container repositories (with group fallback)
+        id: gl_repos
         shell: bash
         env:
           GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GL_API: ${{ steps.ids.outputs.gl_api }}
+          GL_ENC: ${{ steps.ids.outputs.gl_enc }}
+          GL_GROUP_ENC: ${{ steps.ids.outputs.gl_group_enc }}
+          CURL_FLAGS: ${{ env.CURL_FLAGS }}
+          GL_PROJECT: ${{ matrix.project }}
         run: |
           set -euo pipefail
+          # Project-level pagination & accumulation
+          page=1
+          repos_file="$(mktemp)"; echo "[]" > "${repos_file}"
+          while :; do
+            RESP="$(mktemp)"; HDR="$(mktemp)"
+            HTTP=$(curl --fail-with-body -sS ${CURL_FLAGS} \
+              -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
+              -D "${HDR}" -w '%{http_code}' \
+              "${GL_API}/projects/${GL_ENC}/registry/repositories?per_page=100&page=${page}" \
+              -o "${RESP}") || break
+            [[ "${HTTP}" == "200" ]] || break
+            [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || break
+            tmp="$(mktemp)"
+            jq -c -s '.[0] + .[1]' "${repos_file}" "${RESP}" > "${tmp}"
+            mv "${tmp}" "${repos_file}"
+            next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
+            [[ -z "${next:-}" || "${next}" == "0" ]] && break
+            page="${next}"
+          done
 
-          GL_API="${GL_URL%/}/api/v4"
-          ENC="$(jq -rn --arg x "${{ matrix.project }}" '$x|@uri')"
+          repos="$(cat "${repos_file}")"
+          count="$(jq -r 'length' <<< "${repos}" 2>/dev/null || echo 0)"
 
-          repos=$(curl -s $CURL_FLAGS \
-            -H "PRIVATE-TOKEN: $GL_TOKEN" \
-            "$GL_API/projects/$ENC/registry/repositories")
+          # Group-level fallback (filtered to this project context)
+          if [[ "${count}" == "0" ]]; then
+            GRP_JSON="$(mktemp)"
+            HTTP_G=$(curl --fail-with-body -sS ${CURL_FLAGS} \
+              -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
+              -w '%{http_code}' \
+              "${GL_API}/groups/${GL_GROUP_ENC}/registry/repositories?per_page=100" \
+              -o "${GRP_JSON}") || true
 
-          for r in $(jq -r '.[].id' <<< "$repos"); do
-            tags=$(curl -s \
-              -H "PRIVATE-TOKEN: $GL_TOKEN" \
-              "$GL_API/projects/$ENC/registry/repositories/$r/tags" | jq -r '.[].name')
+            if [[ "${HTTP_G}" == "200" && "$(jq -r 'type' "${GRP_JSON}")" == "array" ]]; then
+              filtered="$(jq -c --arg p "${GL_PROJECT}" \
+                '[ .[] | select((.path == $p) or (.location? | tostring | contains($p))) ]' "${GRP_JSON}")"
+              fcount="$(jq -r 'length' <<< "${filtered}")"
+              if [[ "${fcount}" != "0" ]]; then repos="${filtered}"; count="${fcount}"; fi
+            fi
+          fi
 
-            for t in $tags; do
-              SRC="docker://registry.gitlab.com/${{ matrix.project }}:$t"
-              DEST="docker://ghcr.io/$GH_OWNER/$(basename ${{ matrix.project }}):$t"
+          printf 'list=%s\n' "${repos}" >> "$GITHUB_OUTPUT"
+          echo "repo_count=${count}" >> "$GITHUB_OUTPUT"
+          echo "Found ${count} container repo(s)."
 
-              skopeo copy \
+      - name: Copy all tags from GitLab registry → GHCR (API with skopeo fallback)
+        if: ${{ steps.gl_repos.outputs.repo_count != '0' && steps.gl_repos.outputs.list != '[]' }}
+        id: copy
+        shell: bash
+        env:
+          REPO_LIST: ${{ steps.gl_repos.outputs.list }}
+          GL_URL: ${{ env.GL_URL }}
+          GL_REG: ${{ steps.ids.outputs.gl_reg }}
+          GL_ENC: ${{ steps.ids.outputs.gl_enc }}
+          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GL_USER: ${{ steps.ids.outputs.gl_user }}
+          GH_OWNER: ${{ env.GH_OWNER }}
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+          GHCR_HOST: ${{ steps.hosts.outputs.ghcr_host }}
+          DRY_RUN: ${{ env.DRY_RUN }}
+          GL_PROJECT: ${{ matrix.project }}
+          CURL_FLAGS: ${{ env.CURL_FLAGS }}
+        run: |
+          set -euo pipefail
+          json="${REPO_LIST}"
+          count="$(jq -r 'length' <<< "${json}" 2>/dev/null || echo 0)"
+          echo "Processing ${count} repository(ies)..."
+          declare -A LOGGED=()
+          try_login(){ local d="$1" u="$2" p="$3"; skopeo login "$d" --username "$u" --password-stdin <<< "$p"; }
+
+          for i in $(seq 0 $((count-1))); do
+            obj="$(jq -c ".[$i]" <<< "${json}")"
+            loc="$(jq -r '.location // empty' <<< "${obj}")"
+            path="$(jq -r '.path // empty' <<< "${obj}")"
+
+            if [[ -n "${loc}" ]]; then
+              reg_domain="${loc%%/*}"
+              reg_path="${loc#*/}"
+            elif [[ -n "${path}" ]]; then
+              reg_domain="${GL_REG}"
+              reg_path="${path}"
+            else
+              echo "::notice::Skipped one repo (no path)."
+              continue
+            fi
+
+            repo_id="$(jq -r '.id' <<< "${obj}")"
+            # 1) GitLab API list-tags
+            tags="[]"; page=1
+            while :; do
+              RESP="$(mktemp)"; HDR="$(mktemp)"
+              if ! curl --fail-with-body -s ${CURL_FLAGS} \
+                -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
+                -D "${HDR}" \
+                "${GL_URL%/}/api/v4/projects/${GL_ENC}/registry/repositories/${repo_id}/tags?per_page=100&page=${page}" \
+                > "${RESP}"; then
+                break
+              fi
+              [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || break
+              tags="$(jq -c --argjson acc "${tags}" --argjson cur "$(cat "${RESP}")" '($acc + $cur)')"
+              next="$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')"
+              [[ -z "${next:-}" || "${next}" == "0" ]] && break
+              page="${next}"
+            done
+            tcount="$(jq -r 'length' <<< "${tags}" 2>/dev/null || echo 0)"
+
+            # 2) Fallback: skopeo list-tags (private, direct registry call)
+            if [[ "${tcount}" -eq 0 ]]; then
+              SRC_CREDS="${GL_USER}:${GL_TOKEN}"
+              sk_json="$(skopeo list-tags --creds "${SRC_CREDS}" "docker://${reg_domain}/${reg_path}" 2>/dev/null || true)"
+              st_count="$(jq -r '.Tags | length' <<< "${sk_json}" 2>/dev/null || echo 0)"
+              if [[ "${st_count}" -gt 0 ]]; then
+                tags="$(jq -c '.Tags | map({name:.})' <<< "${sk_json}")"
+                tcount="${st_count}"
+              fi
+            fi
+
+            if [[ "${tcount}" -eq 0 ]]; then
+              echo "::notice::No tags for one repository; skipped."
+              continue
+            fi
+
+            # Compute destination path (preserve suffix relative to project)
+            suffix="${reg_path#${GL_PROJECT}}"
+            if [[ "${suffix}" == "${reg_path}" ]]; then
+              proj_name="${GL_PROJECT##*/}"
+              suffix="/${reg_path#*${proj_name}}"
+            fi
+            suffix="${suffix#/}"
+            dest_path="${GH_OWNER}/${GH_REPO}"
+            [[ -n "${suffix}" ]] && dest_path="${dest_path}/${suffix}"
+
+            echo "Copying ${tcount} tag(s) for one repository..."
+
+            # Login to source registry per domain
+            if [[ -z "${LOGGED[${reg_domain}]:-}" ]]; then
+              if try_login "${reg_domain}" "${GL_USER}" "${GL_TOKEN}" \
+                 || try_login "${reg_domain}" "oauth2" "${GL_TOKEN}" \
+                 || try_login "${reg_domain}" "gitlab-ci-token" "${GL_TOKEN}"
+              then
+                LOGGED["${reg_domain}"]=1
+              else
+                echo "::warning::Source registry login failure; copy may fail."
+              fi
+            fi
+
+            while IFS= read -r t; do
+              SRC="docker://${reg_domain}/${reg_path}:${t}"
+              DEST="docker://${GHCR_HOST}/${dest_path}:${t}"
+              if [[ "${DRY_RUN}" == "true" ]]; then
+                echo "DRY-RUN copy tag '${t}'"
+                continue
+              fi
+              # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+              # FIX: Force GHCR to re-index sizes (no size=0)
+              if ! skopeo copy \
                 --all \
                 --preserve-digests=false \
                 --dest-compress \
                 --format oci \
-                "$SRC" "$DEST" || \
-                echo "::warning::Failed tag $t"
-            done
+                "${SRC}" "${DEST}"; then
+                echo "::warning::Copy failed for one tag."
+              fi
+              # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+            done < <(jq -r '.[].name' <<< "${tags}")
           done
 
-# ------------------------------------------------------------
-# 3) NPM PACKAGES (FIXED SIZE)
-# ------------------------------------------------------------
-  npm_packages:
-    needs: discover_projects
+      - name: Summary (containers)
+        if: always()
+        run: echo "Container image migration finished for ${{ matrix.project }}."
+
+  npm_registry_migration_all:
+    name: "3) npm packages (GitLab → GitHub Packages npm) — ALL projects"
+    needs: [discover_projects]
+    if: needs.discover_projects.outputs.project_list != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-
     steps:
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Publish npm packages
+      - name: Install jq
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Compute GitLab npm endpoint
+        id: glnpm
+        shell: bash
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          GL_URL: ${{ env.GL_URL }}
+          GL_PROJECT: ${{ matrix.project }}
           GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          CURL_FLAGS: ${{ env.CURL_FLAGS }}
         run: |
           set -euo pipefail
+          GL_API="${GL_URL%/}/api/v4"
+          ENC="$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')"
+          RESP="$(mktemp)"
+          HTTP=$(curl -sS ${CURL_FLAGS} -H "PRIVATE-TOKEN: ${GL_TOKEN}" -H "Accept: application/json" -H "Connection: close" \
+            -w '%{http_code}' "${GL_API}/projects/${ENC}" -o "${RESP}")
+          if [[ "${HTTP}" != "200" ]]; then
+            echo "npm_url="    >> "$GITHUB_OUTPUT"
+            echo "group_scope=">> "$GITHUB_OUTPUT"
+            echo "inst_host="  >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PID="$(jq -r '.id // empty' "${RESP}")"
+          TOP="$(jq -r '.namespace.full_path | split("/") | .[0]' "${RESP}")"
+          [[ -n "${PID}" && "${PID}" != "null" ]] || { echo "npm_url=" >> "$GITHUB_OUTPUT"; echo "group_scope=" >> "$GITHUB_OUTPUT"; echo "inst_host=" >> "$GITHUB_OUTPUT"; exit 0; }
 
-          echo "@$GH_OWNER:registry=https://npm.pkg.github.com" > .npmrc
-          echo "//npm.pkg.github.com/:_authToken=$GH_PAT" >> .npmrc
+          NPM_URL="${GL_URL%/}/api/v4/projects/${PID}/packages/npm/"
+          INST_HOST="$(echo "${NPM_URL}" | awk -F/ '{print $3}')"
+          echo "npm_url=${NPM_URL}"       >> "$GITHUB_OUTPUT"
+          echo "group_scope=${TOP}"       >> "$GITHUB_OUTPUT"
+          echo "inst_host=${INST_HOST}"   >> "$GITHUB_OUTPUT"
 
-          pkg="$(basename ${{ matrix.project }})"
+      - name: Authenticate to GitLab npm (pull)
+        if: ${{ steps.glnpm.outputs.npm_url != '' }}
+        shell: bash
+        env:
+          GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
+          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GROUP_SCOPE: ${{ steps.glnpm.outputs.group_scope }}
+          INST_HOST: ${{ steps.glnpm.outputs.inst_host }}
+        run: |
+          set -euo pipefail
+          {
+            echo "registry=${GL_NPM_URL}"
+            echo "//${GL_NPM_URL#https://}:__authToken=${GL_TOKEN}"
+            if [[ -n "${INST_HOST:-}" ]]; then
+              echo "//${INST_HOST}/api/v4/packages/npm/:__authToken=${GL_TOKEN}"
+            fi
+            echo "always-auth=true"
+            if [[ -n "${GROUP_SCOPE:-}" ]]; then
+              echo "@${GROUP_SCOPE}:registry=${GL_NPM_URL}"
+            fi
+          } > .npmrc.gl
 
-          versions=$(npm view "$pkg" versions --registry "${GL_URL%/}/api/v4/packages/npm/" --json || echo "[]")
+      - name: Compute GH npm host (GHES-aware)
+        id: ghpkg
+        shell: bash
+        env:
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          srv="${GITHUB_SERVER_URL#*://}"; srv="${srv%%/*}"
+          if [[ "${srv}" == "github.com" ]]; then
+            echo "npm_host=npm.pkg.github.com" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_host=npm.${srv}"         >> "$GITHUB_OUTPUT"
+          fi
 
-          for v in $(jq -r '.[]' <<< "$versions"); do
-            npm pack "$pkg@$v" --registry "${GL_URL%/}/api/v4/packages/npm/"
-            tgz=$(ls *.tgz | tail -1)
-
-            npm publish "$tgz"
+      - name: Detect npm packages in project (GitLab-only)
+        id: pkgs
+        if: ${{ steps.glnpm.outputs.npm_url != '' }}
+        shell: bash
+        env:
+          GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
+          GROUP_SCOPE: ${{ steps.glnpm.outputs.group_scope }}
+        run: |
+          set -euo pipefail
+          PROJ="${{ matrix.project }}"
+          base="${PROJ##*/}"
+          candidates=("${base}" "@${base}/${base}" "@${base}")
+          if [[ -n "${GROUP_SCOPE:-}" ]]; then
+            candidates+=("@${GROUP_SCOPE}/${base}")
+          fi
+          found=()
+          for name in "${candidates[@]}"; do
+            if ! NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm view "${name}" --registry="${GL_NPM_URL}" name >/dev/null 2>&1; then
+              continue
+            fi
+            url="$(NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm view "${name}" --registry="${GL_NPM_URL}" dist.tarball 2>/dev/null || true)"
+            if [[ -n "${url:-}" && "${url}" == "${GL_NPM_URL}"* ]]; then
+              found+=("${name}")
+            fi
           done
+
+          if [[ ${#found[@]} -eq 0 ]]; then
+            echo "list=[]" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "${found[@]}" | jq -R . | jq -s -c . | sed 's/^/list=/' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute destination repo name (for npm linking)
+        id: repo
+        if: ${{ steps.glnpm.outputs.npm_url != '' }}
+        shell: bash
+        env:
+          GL_PROJECT: ${{ matrix.project }}
+          REPO_NAME_MODE: ${{ env.REPO_NAME_MODE }}
+          GH_REPO_PREFIX: ${{ env.GH_REPO_PREFIX }}
+          GH_REPO_SEPARATOR: ${{ env.GH_REPO_SEPARATOR }}
+        run: |
+          set -euo pipefail
+          MODE="${REPO_NAME_MODE:-path}"
+          SEP="${GH_REPO_SEPARATOR:--}"
+          PREF="${GH_REPO_PREFIX:-}"
+          if [[ "${MODE}" == "fullpath" ]]; then
+            base="${GL_PROJECT//\//${SEP}}"
+          else
+            base="${GL_PROJECT##*/}"
+          fi
+          echo "gh_repo=${PREF}${base}" >> "$GITHUB_OUTPUT"
+
+      - name: Migrate npm packages (GitLab → GitHub Packages npm)
+        if: ${{ steps.pkgs.outputs.list != '[]' }}
+        shell: bash
+        env:
+          GH_SCOPE: ${{ env.GH_NPM_SCOPE }}
+          GH_OWNER: ${{ env.GH_OWNER }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GL_NPM_URL: ${{ steps.glnpm.outputs.npm_url }}
+          PKG_LIST: ${{ steps.pkgs.outputs.list }}
+          GH_REPO: ${{ steps.repo.outputs.gh_repo }}
+          NPM_HOST: ${{ steps.ghpkg.outputs.npm_host }}
+        run: |
+          set -euo pipefail
+          GH_SCOPE="${GH_SCOPE:-${GH_OWNER}}"
+          [[ -n "${GH_SCOPE}" ]] || { echo "::error::GH_NPM_SCOPE/GH_OWNER is empty"; exit 1; }
+
+          {
+            echo "@${GH_SCOPE}:registry=https://${NPM_HOST}"
+            echo "//${NPM_HOST}/:_authToken=${GH_PAT}"
+            echo "always-auth=true"
+          } > .npmrc.gh
+
+          workroot="$(pwd)"
+          mapfile -t names < <(jq -r '.[]' <<< "${PKG_LIST}")
+
+          for src in "${names[@]}"; do
+            versions_json=$(NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm view "${src}" --registry="${GL_NPM_URL}" versions --json || echo "[]")
+            [[ -z "${versions_json}" || "${versions_json}" == "null" ]] && versions_json="[]"
+            mapfile -t versions < <(jq -r '.[]?' <<< "${versions_json}")
+            [[ ${#versions[@]} -gt 0 ]] || continue
+
+            for v in "${versions[@]}"; do
+              tgz=$(NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gl" npm pack "${src}@${v}" --registry="${GL_NPM_URL}" --loglevel=error | tail -n1 || true)
+              [[ -n "${tgz}" && -f "${tgz}" ]] || { echo "::warning::Could not pack ${src}@${v}"; continue; }
+
+              workdir="$(mktemp -d)"
+              tar -xzf "${tgz}" -C "${workdir}"
+              pkg="${workdir}/package/package.json"
+
+              newname="@${GH_SCOPE}/$(basename "${src#*@}")"
+              repo_url="${{ github.server_url }}/${{ github.repository_owner }}/${GH_REPO}.git"
+
+              # Rescope package for org and set repository pointer; DO NOT force public access
+              jq --arg newname "${newname}" --arg repo "${repo_url}" \
+                 '.name = $newname | .repository = { "type": "git", "url": $repo }' \
+                 "${pkg}" > "${pkg}.new" && mv "${pkg}.new" "${pkg}"
+
+              safe_base="${newname#@}"; safe_base="${safe_base//\//-}"
+              newtgz="${workroot}/${safe_base}-reScoped-${v}.tgz"
+              tar -czf "${newtgz}" -C "${workdir}/package" .
+
+              [[ -f "${newtgz}" ]] || { echo "::warning::Build failed for one npm version."; continue; }
+
+              # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+              # FIX: publish without --ignore-scripts, so GitHub records size/integrity
+              if ! NPM_CONFIG_USERCONFIG="$(pwd)/.npmrc.gh" npm publish "${newtgz}"; then
+                echo "::warning::Publish failed for one npm version."
+              fi
+              # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+            done
+          done
+
+      - name: Summary (npm)
+        if: always()
+        run: echo "npm migration finished for ${{ matrix.project }}."
