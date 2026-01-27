@@ -385,142 +385,295 @@ jobs:
           echo "Pushing tags..."
           git push --tags github
 
-  # 4) Repo Migration · 1.3 PR Sync (MR → PR) — optional
   repo_migration_pr_sync_all:
-    name: "4) Repo Migration · 1.3 PR Sync (MR → PR) (ALL projects)"
-    needs: [discover_projects, repo_migration_commit_sync_all]
-    if: ${{ vars.MIGRATE_MRS == 'false' }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 3
-      matrix:
-        project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
-    env:
-      GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-      GH_PAT:   ${{ secrets.GH_PAT }}
-      GL_URL:   ${{ vars.GL_URL }}
-      GH_OWNER: ${{ vars.GH_OWNER }}
-      REPO_NAME_MODE:    ${{ vars.REPO_NAME_MODE }}
-      GH_REPO_PREFIX:    ${{ vars.GH_REPO_PREFIX }}
-      GH_REPO_SEPARATOR: ${{ vars.GH_REPO_SEPARATOR }}
-    steps:
-      - name: Install jq & curl
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq curl
+  name: "4) Repo Migration · 1.3 PR Sync (MR → PR) (ALL projects)"
+  needs: [discover_projects, repo_migration_commit_sync_all]
+  if: ${{ vars.MIGRATE_MRS != 'false' }} # default ON; set to 'false' to disable
+  runs-on: ubuntu-latest
+  strategy:
+    fail-fast: false
+    max-parallel: 3
+    matrix:
+      project: ${{ fromJson(needs.discover_projects.outputs.project_list) }}
+  permissions:
+    contents: write
+    pull-requests: write
+  env:
+    GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+    GH_PAT:   ${{ secrets.GH_PAT }}
+    GL_URL:   ${{ vars.GL_URL }}
+    GH_OWNER: ${{ vars.GH_OWNER }}
+    REPO_NAME_MODE:     ${{ vars.REPO_NAME_MODE }}
+    GH_REPO_PREFIX:     ${{ vars.GH_REPO_PREFIX }}
+    GH_REPO_SEPARATOR:  ${{ vars.GH_REPO_SEPARATOR }}
+    # Optional:
+    DRY_RUN_MRS: ${{ vars.DRY_RUN_MRS }} # set to 'true' to simulate (no writes)
+  steps:
+    - name: Install jq, curl, gh
+      run: |
+        set -euo pipefail
+        sudo apt-get update -y
+        sudo apt-get install -y jq curl
+        if ! command -v gh >/dev/null 2>&1; then
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+          sudo apt-get update -y && sudo apt-get install -y gh
+        fi
+        echo "${GH_PAT}" | gh auth login --with-token --hostname github.com
+        gh auth status
 
-      - name: Prepare GitLab API (+ compute GH_REPO)
-        id: prep
-        env:
-          GL_PROJECT: ${{ matrix.project }}
-        run: |
-          set -euo pipefail
-          GL_API="${GL_URL%/}/api/v4"
-          GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
-          echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
-          echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
-          MODE="${REPO_NAME_MODE:-path}"
-          PREF="${GH_REPO_PREFIX:-}"
-          SEP="${GH_REPO_SEPARATOR:-"-"}"
-          if [[ "${MODE}" == "fullpath" ]]; then
-            base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
-          else
-            base="${GL_PROJECT##*/}"
+    - name: Prepare GitLab API (+ compute GH_REPO)
+      id: prep
+      env:
+        GL_PROJECT: ${{ matrix.project }}
+      run: |
+        set -euo pipefail
+        GL_API="${GL_URL%/}/api/v4"
+        GL_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
+        echo "GL_API=${GL_API}" >> "$GITHUB_ENV"
+        echo "GL_ENC=${GL_ENC}" >> "$GITHUB_ENV"
+
+        MODE="${REPO_NAME_MODE:-path}"
+        PREF="${GH_REPO_PREFIX:-}"
+        SEP="${GH_REPO_SEPARATOR:-"-"}"
+        if [[ "${MODE}" == "fullpath" ]]; then
+          base="$(echo "${GL_PROJECT}" | tr '/' "${SEP}")"
+        else
+          base="${GL_PROJECT##*/}"
+        fi
+        GH_REPO="${PREF}${base}"
+        echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
+
+    - name: Migrate merge requests → pull requests (robust)
+      env:
+        GH_REPO: ${{ steps.prep.outputs.gh_repo }}
+        GL_PROJECT: ${{ matrix.project }}
+      run: |
+        set -euo pipefail
+
+        dry="${DRY_RUN_MRS:-false}"
+        REPO_SLUG="${GH_OWNER}/${GH_REPO}"
+
+        echo "::group::Sanity checks & helpers"
+        # Helper: GH ref HEAD/BASE existence check with URL-encoding
+        function gh_has_ref() {
+          local ref="$1"
+          local enc; enc=$(jq -rn --arg x "$ref" '$x|@uri')
+          local code
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            "https://api.github.com/repos/${REPO_SLUG}/git/refs/heads/${enc}")
+          [[ "$code" == "200" ]]
+        }
+
+        # Helper: create branch from SHA, returns 0 on success
+        function gh_create_branch_from_sha() {
+          local branch="$1" sha="$2"
+          local payload; payload=$(jq -n --arg ref "refs/heads/${branch}" --arg sha "${sha}" '{ref:$ref, sha:$sha}')
+          local http
+          if [[ "${dry}" == "true" ]]; then
+            echo "DRY-RUN: would create branch '${branch}' at ${sha}"
+            return 0
           fi
-          GH_REPO="${PREF}${base}"
-          echo "gh_repo=${GH_REPO}" >> "$GITHUB_OUTPUT"
+          http=$(curl -s -w "%{http_code}" -o /dev/null \
+            -X POST -H "Authorization: Bearer ${GH_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            -d "${payload}" \
+            "https://api.github.com/repos/${REPO_SLUG}/git/refs")
+          [[ "$http" == "201" ]]
+        }
 
-      - name: Migrate merge requests → pull requests
-        env:
-          GH_REPO: ${{ steps.prep.outputs.gh_repo }}
-        run: |
-          set -euo pipefail
-          page=1
-          while true; do
-            RESP=$(mktemp) ; HDR=$(mktemp)
-            if ! curl --fail-with-body -s -D "${HDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
-                 "${GL_API}/projects/${GL_ENC}/merge_requests?scope=all&per_page=100&page=${page}" > "${RESP}"; then
-              echo "ERROR: GitLab MRs API non-2xx"; cat "${HDR}" || true; head -c 300 "${RESP}" || true; exit 1
+        # Helper: safe fallback branch name
+        function fallback_branch_name() {
+          local iid="$1" name="$2"
+          local sani; sani=$(echo -n "$name" | tr '[:space:]/\\' '---' | tr -cd 'A-Za-z0-9._-')
+          echo "imported/mr-${iid}-${sani}"
+        }
+
+        # Helper: check for existing PR (head+base)
+        function gh_find_existing_pr() {
+          local head="$1" base="$2"
+          gh pr list --repo "${REPO_SLUG}" --head "${head}" --base "${base}" --json number --jq '.[0].number' 2>/dev/null || true
+        }
+
+        echo "::endgroup::"
+
+        page=1
+        while true; do
+          RESP=$(mktemp) ; HDR=$(mktemp)
+          if ! curl --fail-with-body -s -D "${HDR}" \
+               -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+               "${GL_API}/projects/${GL_ENC}/merge_requests?scope=all&per_page=100&page=${page}" > "${RESP}"; then
+            echo "::error::GitLab MRs API non-2xx (page ${page})"
+            head -c 300 "${RESP}" || true
+            exit 1
+          fi
+
+          t="$(jq -r 'type' "${RESP}" 2>/dev/null || echo "unknown")"
+          if [[ "${t}" != "array" ]]; then
+            echo "::warning::MRs response is not array; stopping."
+            head -c 300 "${RESP}" || true
+            break
+          fi
+
+          # Iterate MRs
+          jq -c '.[]' "${RESP}" | while IFS= read -r mr; do
+            title=$(jq -r '.title' <<< "${mr}")
+            body=$(jq -r '.description // ""' <<< "${mr}")
+            state=$(jq -r '.state' <<< "${mr}")           # opened, closed, merged
+            labels=$(jq -c '.labels // []' <<< "${mr}")   # array of strings
+            source_branch=$(jq -r '.source_branch' <<< "${mr}")
+            target_branch=$(jq -r '.target_branch' <<< "${mr}")
+            author=$(jq -r '.author.username // "unknown"' <<< "${mr}")
+            gl_iid=$(jq -r '.iid' <<< "${mr}")
+            sha=$(jq -r '.sha // empty' <<< "${mr}")
+
+            # Build source URL to include in body
+            GL_PROJECT_ENC=$(jq -rn --arg x "${GL_PROJECT}" '$x|@uri')
+            gl_url="${GL_URL%/}/${GL_PROJECT}/-/merge_requests/${gl_iid}"
+
+            echo ""
+            echo "== MR #${gl_iid}: ${source_branch} → ${target_branch} (state=${state}) =="
+
+            # Ensure BASE exists in GH
+            if ! gh_has_ref "${target_branch}"; then
+              echo "::notice::Skipping MR#${gl_iid}: target/base branch '${target_branch}' not found in ${REPO_SLUG}"
+              continue
             fi
-            [[ "$(jq -r 'type' "${RESP}")" == "array" ]] || { echo "WARN: MRs response not array"; head -c 300 "${RESP}" || true; break; }
 
-            jq -c '.[]' "${RESP}" | while IFS= read -r mr; do
-              title=$(printf '%s' "${mr}" | jq -r '.title')
-              body=$(printf  '%s' "${mr}" | jq -r '.description // ""')
-              state=$(printf '%s' "${mr}" | jq -r '.state')
-              labels=$(printf '%s' "${mr}" | jq -c '.labels')
-              source_branch=$(printf '%s' "${mr}" | jq -r '.source_branch')
-              target_branch=$(printf '%s' "${mr}" | jq -r '.target_branch')
-              author=$(printf '%s' "${mr}" | jq -r '.author.username')
-              gl_iid=$(printf '%s' "${mr}" | jq -r '.iid')
-
-              HEAD_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${source_branch}")
-              BASE_OK=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/git/refs/heads/${target_branch}")
-              if [[ "${HEAD_OK}" != "200" || "${BASE_OK}" != "200" ]]; then
-                echo "Skip MR#${gl_iid}: missing head/base (${source_branch}→${target_branch})"
+            head_to_use="${source_branch}"
+            # Ensure HEAD exists in GH; recreate if missing using MR SHA
+            if ! gh_has_ref "${source_branch}"; then
+              if [[ -z "${sha}" || "${sha}" == "null" ]]; then
+                echo "::notice::Skipping MR#${gl_iid}: missing source branch '${source_branch}' and no SHA to recreate."
                 continue
               fi
+              echo "Source '${source_branch}' missing; attempting to recreate at ${sha}"
+              if ! gh_create_branch_from_sha "${source_branch}" "${sha}"; then
+                # Fallback to safe name
+                fallback="$(fallback_branch_name "${gl_iid}" "${source_branch}")"
+                echo "Recreate failed; trying fallback branch '${fallback}'"
+                if gh_create_branch_from_sha "${fallback}" "${sha}"; then
+                  head_to_use="${fallback}"
+                else
+                  echo "::warning::Could not recreate head for MR#${gl_iid}; skipping."
+                  continue
+                fi
+              fi
+            fi
 
-              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer ${GH_PAT}" \
+            # De-duplication: skip if PR already exists for same head+base
+            existing="$(gh_find_existing_pr "${head_to_use}" "${target_branch}")"
+            if [[ -n "${existing}" ]]; then
+              echo "::notice::PR already exists (#${existing}) for head='${head_to_use}' base='${target_branch}'"
+              continue
+            fi
+
+            pr_body="**Imported from GitLab by @${author}**\n\n${body}\n\n---\n_Source MR_: ${gl_url}\n_IID_: ${gl_iid}"
+            if [[ "${dry}" == "true" ]]; then
+              echo "DRY-RUN: would create PR head='${head_to_use}' base='${target_branch}'"
+              pr_num=""
+            else
+              CREATE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+                -H "Authorization: Bearer ${GH_PAT}" \
                 -H "Accept: application/vnd.github+json" \
-                -d "$(jq -n --arg title "${title}" --arg body "**Imported from GitLab by @${author}**\n\n${body}" \
-                           --arg head "${source_branch}" --arg base "${target_branch}" \
-                           '{title:$title, body:$body, head:$head, base:$base}')" \
-                "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls")
+                -d "$(jq -n \
+                      --arg title "${title}" \
+                      --arg body  "${pr_body}" \
+                      --arg head  "${head_to_use}" \
+                      --arg base  "${target_branch}" \
+                      '{title:$title, body:$body, head:$head, base:$base}')" \
+                "https://api.github.com/repos/${REPO_SLUG}/pulls")
               http=$(echo "${CREATE}" | sed -n 's/^HTTP_STATUS://p')
               pr_num=$(echo "${CREATE}" | sed '/^HTTP_STATUS:/d' | jq -r '.number // empty')
               echo "PR create status=${http} number=${pr_num}"
+              if [[ "${http}" != "201" || -z "${pr_num}" ]]; then
+                echo "::warning::Failed to create PR for MR#${gl_iid} (HTTP ${http}); continuing."
+                pr_num=""
+              fi
+            fi
 
-              if [[ -n "${pr_num}" && "${labels}" != "null" ]]; then
-                curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-                  -d "${labels}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/labels" >/dev/null
-                sleep 1
+            # Apply labels (if any) + imported marker
+            if [[ -n "${pr_num}" ]]; then
+              combined_labels=$(jq -c '. + ["imported:gitlab"] | unique' <<< "${labels}")
+              if [[ "${dry}" == "true" ]]; then
+                echo "DRY-RUN: would add labels ${combined_labels} to PR #${pr_num}"
+              else
+                # best-effort; ignore 4xx if some labels don't exist (label sync job should have created them)
+                curl -s -o /dev/null \
+                  -H "Authorization: Bearer ${GH_PAT}" \
+                  -H "Accept: application/vnd.github+json" \
+                  -d "${combined_labels}" \
+                  "https://api.github.com/repos/${REPO_SLUG}/issues/${pr_num}/labels" || true
               fi
 
-              if [[ -n "${pr_num}" ]]; then
-                if [[ "${state}" == "closed" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
+              # Map state: closed/merged ⇒ close PR (never auto-merge)
+              if [[ "${state}" == "closed" || "${state}" == "merged" ]]; then
+                if [[ "${dry}" == "true" ]]; then
+                  echo "DRY-RUN: would close PR #${pr_num}"
+                else
+                  curl -s -o /dev/null \
+                    -X PATCH \
+                    -H "Authorization: Bearer ${GH_PAT}" \
+                    -H "Accept: application/vnd.github+json" \
                     -d '{"state":"closed"}' \
-                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}" >/dev/null
-                elif [[ "${state}" == "merged" ]]; then
-                  curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-                    -d '{"merge_method":"merge"}' \
-                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/pulls/${pr_num}/merge" >/dev/null
+                    "https://api.github.com/repos/${REPO_SLUG}/issues/${pr_num}" || true
                 fi
-                sleep 1
+                if [[ "${state}" == "merged" && "${dry}" != "true" ]]; then
+                  curl -s -o /dev/null \
+                    -H "Authorization: Bearer ${GH_PAT}" \
+                    -H "Accept: application/vnd.github+json" \
+                    -d '["imported-merged"]' \
+                    "https://api.github.com/repos/${REPO_SLUG}/issues/${pr_num}/labels" || true
+                fi
               fi
 
-              # Comments
+              # Import comments
               cpage=1
               while true; do
                 CRESP=$(mktemp) ; CHDR=$(mktemp)
-                if ! curl --fail-with-body -s -D "${CHDR}" -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
+                # GitLab: only user comments
+                if ! curl --fail-with-body -s -D "${CHDR}" \
+                     -H "PRIVATE-TOKEN: ${GL_TOKEN}" \
                      "${GL_API}/projects/${GL_ENC}/merge_requests/${gl_iid}/notes?activity_filter=only_comments&per_page=100&page=${cpage}" > "${CRESP}"; then
-                  echo "WARN: MR comments non-2xx for MR#${gl_iid} page ${cpage}"; head -c 300 "${CRESP}" || true; break
+                  echo "::notice::MR#${gl_iid} comments page ${cpage}: non-2xx; stopping comments import."
+                  break
                 fi
-                [[ "$(jq -r 'type' "${CRESP}")" == "array" ]] || { echo "WARN: comments response not array"; head -c 300 "${CRESP}" || true; break; }
+                ctype="$(jq -r 'type' "${CRESP}" 2>/dev/null || echo "unknown")"
+                [[ "${ctype}" == "array" ]] || break
 
                 jq -c '.[]' "${CRESP}" | while IFS= read -r note; do
-                  nbody=$(printf '%s' "${note}" | jq -r '.body')
-                  nauth=$(printf '%s' "${note}" | jq -r '.author.username')
-                  curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GH_PAT}" -H "Accept: application/vnd.github+json" \
-                    -d "$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')" \
-                    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/issues/${pr_num}/comments" >/dev/null
-                  sleep 1
+                  nbody=$(jq -r '.body // ""' <<< "${note}")
+                  nauth=$(jq -r '.author.username // "unknown"' <<< "${note}")
+                  gh_comment=$(jq -n --arg b "**@${nauth} (from GitLab)**\n\n${nbody}" '{body:$b}')
+                  if [[ "${dry}" == "true" ]]; then
+                    echo "DRY-RUN: would create PR comment on #${pr_num}"
+                  else
+                    curl -s -o /dev/null \
+                      -H "Authorization: Bearer ${GH_PAT}" \
+                      -H "Accept: application/vnd.github+json" \
+                      -d "${gh_comment}" \
+                      "https://api.github.com/repos/${REPO_SLUG}/issues/${pr_num}/comments" || true
+                  fi
+                  sleep 0.6
                 done
+
                 nnext=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${CHDR}" | tr -d '\r')
                 [[ -z "${nnext:-}" || "${nnext}" == "0" ]] && break
                 cpage="${nnext}"
               done
-            done
+            fi
 
-            next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
-            [[ -z "${next:-}" || "${next}" == "0" ]] && break
-            page="${next}"
+            # gentle pacing
+            sleep 0.8
           done
+
+          next=$(awk -F': ' '/^X-Next-Page:/ {print $2}' "${HDR}" | tr -d '\r')
+          [[ -z "${next:-}" || "${next}" == "0" ]] && break
+          page="${next}"
+        done
 
   # 5) Repo Migration · 1.4 Label Sync — ALL projects
   repo_migration_label_sync_all:
