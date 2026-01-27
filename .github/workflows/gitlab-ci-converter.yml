@@ -389,7 +389,7 @@ jobs:
   repo_migration_pr_sync_all:
     name: "4) Repo Migration · 1.3 PR Sync (MR → PR) (ALL projects)"
     needs: [discover_projects, repo_migration_commit_sync_all]
-    if: ${{ vars.MIGRATE_MRS == 'true' }}
+    if: ${{ vars.MIGRATE_MRS == 'false' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
